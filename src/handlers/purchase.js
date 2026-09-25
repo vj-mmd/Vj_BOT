@@ -87,7 +87,7 @@ export async function showProducts(env, telegram, chatId, messageId, categoryId)
     data: `buy:prod:${p.id}`,
   }));
   await telegram.editOrSend(chatId, messageId, "یک محصول را انتخاب کنید:", {
-    reply_markup: keyboard(buttons, { perRow: 1, back: "buy:categories" }),
+    reply-markup: keyboard(buttons, { perRow: 1, back: "buy:categories" }),
   });
 }
 
