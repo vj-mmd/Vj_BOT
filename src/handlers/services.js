@@ -22,7 +22,7 @@ export async function showServiceList(env, telegram, chatId, messageId, userId) 
 
   const buttons = services
     .filter(Boolean)
-    .map((s) => ({ text: `📦 #${s.id} — ${statusLabel(s)}`, data: `svc:view:${s.id}` }));
+    .map((s) => ({ text: `📦 ${s.id} - ${statusLabel(s)}`, data: `svc:view:${s.id}` }));
 
   await telegram.editOrSend(chatId, messageId, "📦 <b>سرویس‌های من</b>", {
     reply_markup: keyboard(buttons, { perRow: 1, back: "menu:main" }),
