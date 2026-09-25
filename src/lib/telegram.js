@@ -66,12 +66,16 @@ export function tg(env) {
     },
 
     // Try to edit; if the message can't be edited (too old / not found), send a new one instead.
-    async editOrSend(chatId, messageId, text, extra = {}) {
-      if (messageId) {
-        const r = await this.editMessageText(chatId, messageId, text, extra);
-        if (r.ok) return r;
-      }
-      return this.sendMessage(chatId, text, extra);
-    },
+// If Telegram just says "not modified" (content is identical), that's not a
+// real failure - do nothing instead of spamming a duplicate message.
+async editOrSend(chatId, messageId, text, extra = {}) {
+  if (messageId) {
+    const r = await this.editMessageText(chatId, messageId, text, extra);
+    if (r.ok) return r;
+    const desc = (r.description || "").toLowerCase();
+    if (desc.includes("message is not modified")) return r;
+  }
+  return this.sendMessage(chatId, text, extra);
+},
   };
 }
