@@ -58,7 +58,7 @@ export async function handleTestGet(env, telegram, chatId, messageId, userId) {
     const username = `test_${userId}_${Date.now()}`;
     const result = await provisionUser(picked.panel, picked.profile, {
       username,
-      volumeGB: settings.test_volume_gb,
+      volumeGB: settings.test_volume_gb / 1024,
       days: settings.test_duration_days,
     });
 
