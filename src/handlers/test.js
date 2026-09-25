@@ -20,7 +20,6 @@ async function pickTestProfile(kv) {
 export async function showTestMenu(env, telegram, chatId, messageId) {
   const settings = await getSettings(env.BOT_KV);
   const text =
-    `🎁 <b>اکانت تست</b>\n\n` +
     `📦 حجم تست: ${settings.test_volume_gb}MB\n` +
     `⏳ مدت تست: ${settings.test_duration_days} روز\n` +
     `🔁 تعداد مجاز: ${settings.test_count} بار`;
