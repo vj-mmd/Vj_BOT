@@ -1,0 +1,89 @@
+// Adapter for PasarGuard panels (a Marzban fork, sometimes called "Pasargad"
+// by its Persian name). Auth and the core user-management endpoints follow
+// the same shape as Marzban's API. Newer PasarGuard versions (v4+) reference
+// users by numeric ID in some places (e.g. Xray routing rules) instead of
+// username/email, but the endpoints used here (create/get/delete a user by
+// username) are stable across versions. Check {panel_url}/docs on your own
+// panel to confirm field names if something doesn't match.
+
+async function getToken(panel) {
+  const res = await fetch(`${panel.url}/api/admin/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ username: panel.username, password: panel.password }),
+  });
+  if (!res.ok) throw new Error(`pasarguard auth failed: ${res.status}`);
+  const data = await res.json();
+  return data.access_token;
+}
+
+export async function testConnection(panel) {
+  try {
+    await getToken(panel);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+// profile: { protocol: 'vless'|'vmess'|'trojan'|'shadowsocks', inbound_tag, settings? }
+export async function createUser(panel, profile, { username, volumeGB, days }) {
+  const token = await getToken(panel);
+  const expire = Math.floor(Date.now() / 1000) + days * 86400;
+  const body = {
+    username,
+    proxies: { [profile.protocol]: profile.settings || {} },
+    inbounds: { [profile.protocol]: [profile.inbound_tag] },
+    expire,
+    data_limit: volumeGB > 0 ? volumeGB * 1024 * 1024 * 1024 : 0,
+    data_limit_reset_strategy: "no_reset",
+    status: "active",
+  };
+  const res = await fetch(`${panel.url}/api/user`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`pasarguard create user failed: ${res.status} ${await res.text()}`);
+  const data = await res.json();
+  return {
+    username: data.username,
+    subscription_url: panel.url + data.subscription_url,
+    config_links: data.links || [],
+    raw: data,
+  };
+}
+
+export async function getUser(panel, username) {
+  const token = await getToken(panel);
+  const res = await fetch(`${panel.url}/api/user/${encodeURIComponent(username)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return {
+    username: data.username,
+    used_traffic_bytes: data.used_traffic || 0,
+    data_limit_bytes: data.data_limit || 0,
+    expire: data.expire,
+    status: data.status,
+    subscription_url: panel.url + data.subscription_url,
+  };
+}
+
+export async function deleteUser(panel, username) {
+  const token = await getToken(panel);
+  await fetch(`${panel.url}/api/user/${encodeURIComponent(username)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function disableUser(panel, username) {
+  const token = await getToken(panel);
+  await fetch(`${panel.url}/api/user/${encodeURIComponent(username)}`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "disabled" }),
+  });
+}
