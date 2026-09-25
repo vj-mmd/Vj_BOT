@@ -19,4 +19,5 @@ kv_namespaces = [
 
 [vars]
 # Non-secret defaults (safe to keep in this file)
-BOT_NAME = "VPN Shop Bot"
+BOT_NAME = "Vj"
+BOT_USERNAME = "Vj_PANEL_BOT"
