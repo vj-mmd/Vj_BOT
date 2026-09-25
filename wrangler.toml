@@ -8,8 +8,8 @@ compatibility_date = "2024-09-01"
 #   npx wrangler kv namespace create BOT_SESSIONS
 # then paste the returned ids below.
 kv_namespaces = [
-  { binding = "BOT_KV", id = "REPLACE_WITH_BOT_KV_ID" },
-  { binding = "BOT_SESSIONS", id = "REPLACE_WITH_BOT_SESSIONS_ID" }
+  { binding = "BOT_KV", id = "2dc3b08851bf4d86b542cb1334b8381d" },
+  { binding = "BOT_SESSIONS", id = "c52b2e299f194abfb106edcddeb3aa55" }
 ]
 
 # --- Secrets (set with `npx wrangler secret put NAME`, do NOT put real values here) ---
