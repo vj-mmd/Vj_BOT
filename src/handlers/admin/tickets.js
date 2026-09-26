@@ -52,7 +52,7 @@ export async function handleTicketReplyInput(env, telegram, message, state) {
   ticket.status = "answered";
   await saveTicket(kv, ticket);
 
-  await telegram.sendMessage(ticket.user_id, `👨‍💻 پاسخ پشتیبانی (تیکت #${ticket.id}):\n\n${text}`);
+  await telegram.sendMessage(ticket.user_id, `☎️ پاسخ پشتیبانی:\n\n${text}`);
   await telegram.sendMessage(chatId, "✅ پاسخ ارسال شد.");
 }
 
