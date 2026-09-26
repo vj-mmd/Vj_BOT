@@ -2,7 +2,7 @@
 // KV has no querying, so every "list" (users, products, orders...) is kept
 // as a small index array under one key, plus one key per record.
 // KV is eventually-consistent and has no transactions: fine for a shop bot
-// at normal traffic, but don't rely on it for high-frequency concurrent
+// at normal traffic, but don't rely it for high-frequency concurrent
 // writes to the exact same key (e.g. hundreds of wallet charges/sec).
 
 async function getJSON(kv, key, fallback) {
@@ -133,6 +133,8 @@ const DEFAULT_SETTINGS = {
   online_gateway_enabled: false,
   support_id: "@support",
   report_channel_id: null,
+  log_channel_id: null,
+  log_topics: {},
 };
 
 export async function getSettings(kv) {
