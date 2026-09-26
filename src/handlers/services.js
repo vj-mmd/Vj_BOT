@@ -38,7 +38,7 @@ export async function showServiceDetail(env, telegram, chatId, messageId, servic
 
   const text =
     `🔍 <b>جزئیات سرویس ${service.id}</b>\n\n` +
-    `👤 نام کاربری: <code>${service.username}</code>\n` +
+    `👤 نام کاربری : <code>${service.username}</code>\n` +
     `📦 حجم کل: ${service.volume_gb}GB\n` +
     `📉 مصرف: ${(service.used_gb || 0).toFixed(2)}GB\n` +
     `📈 باقی‌مانده: ${Math.max(0, service.volume_gb - (service.used_gb || 0)).toFixed(2)}GB\n` +
