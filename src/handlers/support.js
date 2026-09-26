@@ -17,7 +17,7 @@ export async function showSupportMenu(env, telegram, chatId, messageId) {
     ],
     { back: "menu:main" }
   );
-  await telegram.editOrSend(chatId, messageId, "💬 بخش پشتیبانی را انتخاب کنید:", { reply_markup: kb });
+  await telegram.editOrSend(chatId, messageId, "☎️ بخش پشتیبانی را انتخاب کنید:", { reply_markup: kb });
 }
 
 export async function showFaqList(env, telegram, chatId, messageId) {
@@ -48,7 +48,7 @@ export async function startTicketFlow(env, telegram, chatId, messageId, userId) 
     return;
   }
   await setState(env, userId, { step: "await_ticket_message" });
-  await telegram.editOrSend(chatId, messageId, "👨‍💻 پیام خود را برای پشتیبانی ارسال کنید:", {
+  await telegram.editOrSend(chatId, messageId, "☎️ پیام خود را برای پشتیبانی ارسال کنید:", {
     reply_markup: keyboard([], { back: "support:main" }),
   });
 }
