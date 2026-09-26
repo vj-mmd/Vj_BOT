@@ -17,7 +17,7 @@ export async function showSupportMenu(env, telegram, chatId, messageId) {
     ],
     { back: "menu:main" }
   );
-  await telegram.editOrSend(chatId, messageId, "💬 بخش پشتیبانی را انتخاب کنید:", { reply_markup: kb });
+  await telegram.editOrSend(chatId, messageId, "☎️ بخش پشتیبانی را انتخاب کنید:", { reply_markup: kb });
 }
 
 export async function showFaqList(env, telegram, chatId, messageId) {
@@ -41,7 +41,7 @@ export async function startTicketFlow(env, telegram, chatId, messageId, userId) 
     await telegram.editOrSend(
       chatId,
       messageId,
-      `شما یک تیکت باز دارید (#${existing.id}). پیام بعدی شما به همان تیکت اضافه می‌شود.`,
+      `شما یک تیکت باز دارید  پیام بعدی شما به همان تیکت اضافه می‌شود.`,
       { reply_markup: keyboard([], { back: "support:main" }) }
     );
     await setState(env, userId, { step: "await_ticket_message", ticket_id: existing.id });
@@ -73,7 +73,7 @@ export async function handleTicketMessageInput(env, telegram, message, state) {
   await telegram.sendMessage(chatId, "✅ پیام شما برای پشتیبانی ارسال شد.");
 
   const admins = await getAdmins(kv);
-  const kb = keyboard([{ text: "✍️ پاسخ", data: `admin:ticket:reply:${ticket.id}` }], { perRow: 1 });
+  const kb = keyboard([{ text: "☎️ پاسخ", data: `admin:ticket:reply:` }], { perRow: 1 });
   for (const admin of admins) {
     await telegram.sendMessage(
       admin.id,
