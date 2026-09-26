@@ -59,7 +59,7 @@ export async function showCategories(env, telegram, chatId, messageId) {
   const categories = (await getCategories(env.BOT_KV)).filter((c) => c.active);
   if (categories.length === 0) {
     await telegram.editOrSend(chatId, messageId, "در حال حاضر محصولی برای فروش وجود ندارد.", {
-      reply-markup: keyboard([], { back: "menu:main" }),
+      reply_markup: keyboard([], { back: "menu:main" }),
     });
     return;
   }
@@ -68,7 +68,7 @@ export async function showCategories(env, telegram, chatId, messageId) {
     .map((c) => ({ text: c.name, data: `buy:cat:${c.id}` }));
 
   await telegram.editOrSend(chatId, messageId, "🛒 یک دسته‌بندی را انتخاب کنید:", {
-    reply-markup: keyboard(buttons, { back: "menu:main" }),
+    reply_markup: keyboard(buttons, { back: "menu:main" }),
   });
 }
 
@@ -78,16 +78,16 @@ export async function showProducts(env, telegram, chatId, messageId, categoryId)
   const products = (await listProductsByCategory(env.BOT_KV, categoryId)).filter((p) => p.active);
   if (products.length === 0) {
     await telegram.editOrSend(chatId, messageId, "محصولی در این دسته موجود نیست.", {
-      reply-markup: keyboard([], { back: "buy:categories" }),
+      reply_markup: keyboard([], { back: "buy:categories" }),
     });
     return;
   }
   const buttons = products.map((p) => ({
-    text: `${p.name} - ${toman(p.price)}`,
+    text: `${p.name} — ${toman(p.price)}`,
     data: `buy:prod:${p.id}`,
   }));
   await telegram.editOrSend(chatId, messageId, "یک محصول را انتخاب کنید:", {
-    reply-markup: keyboard(buttons, { perRow: 1, back: "buy:categories" }),
+    reply_markup: keyboard(buttons, { perRow: 1, back: "buy:categories" }),
   });
 }
 
@@ -103,7 +103,7 @@ export async function showProductDetail(env, telegram, chatId, messageId, produc
   const product = await getProduct(env.BOT_KV, productId);
   if (!product) {
     await telegram.editOrSend(chatId, messageId, "این محصول دیگر موجود نیست.", {
-      reply-markup: keyboard([], { back: "buy:categories" }),
+      reply_markup: keyboard([], { back: "buy:categories" }),
     });
     return;
   }
@@ -128,7 +128,7 @@ export async function showProductDetail(env, telegram, chatId, messageId, produc
   if (!discount) buttons.push({ text: "🎟 وارد کردن کد تخفیف", data: `buy:discount:${product.id}` });
 
   await telegram.editOrSend(chatId, messageId, text, {
-    reply-markup: keyboard(buttons, { perRow: 1, back: `buy:cat:${product.category_id}` }),
+    reply_markup: keyboard(buttons, { perRow: 1, back: `buy:cat:${product.category_id}` }),
   });
 }
 
@@ -147,7 +147,7 @@ async function validDiscountFor(kv, code, product) {
 export async function promptDiscountCode(env, telegram, chatId, messageId, userId, productId) {
   await setState(env, userId, { step: "await_discount_code", product_id: productId });
   await telegram.editOrSend(chatId, messageId, "🎟 کد تخفیف خود را ارسال کنید:", {
-    reply-markup: keyboard([], { back: `buy:prod:${productId}` }),
+    reply_markup: keyboard([], { back: `buy:prod:${productId}` }),
   });
 }
 
@@ -162,7 +162,7 @@ export async function handleDiscountCodeInput(env, telegram, message, state) {
 
   if (!discount) {
     await telegram.sendMessage(chatId, "❌ کد تخفیف نامعتبر یا منقضی شده است.", {
-      reply-markup: keyboard([{ text: "🛍 بازگشت به محصول", data: `buy:prod:${product.id}` }], { perRow: 1 }),
+      reply_markup: keyboard([{ text: "🛍 بازگشت به محصول", data: `buy:prod:${product.id}` }], { perRow: 1 }),
     });
     return;
   }
@@ -186,7 +186,7 @@ export async function showPayConfirm(env, telegram, chatId, messageId, userId, p
 
   if (user.balance < finalPrice) {
     await telegram.editOrSend(chatId, messageId, text + "\n\n❌ موجودی کیف پول کافی نیست.", {
-      reply-markup: keyboard([{ text: "💳 شارژ کیف پول", data: "wallet:charge" }], {
+      reply_markup: keyboard([{ text: "💳 شارژ کیف پول", data: "wallet:charge" }], {
         perRow: 1,
         back: `buy:prod:${product.id}`,
       }),
@@ -195,7 +195,7 @@ export async function showPayConfirm(env, telegram, chatId, messageId, userId, p
   }
 
   await telegram.editOrSend(chatId, messageId, text, {
-    reply-markup: {
+    reply_markup: {
       inline_keyboard: [
         [
           { text: "✅ تأیید خرید", callback_data: `buy:confirm:${product.id}:${discountCode}` },
@@ -293,7 +293,7 @@ export async function handlePurchaseConfirm(env, telegram, chatId, messageId, us
       `⏳ انقضا: ${new Date(service.expires_at).toLocaleDateString("fa-IR")}`;
 
     await telegram.sendMessage(chatId, text, {
-      reply-markup: keyboard([{ text: "🔍 مشاهده سرویس", data: `svc:view:${service.id}` }], {
+      reply_markup: keyboard([{ text: "🔍 مشاهده سرویس", data: `svc:view:${service.id}` }], {
         perRow: 1,
         back: "menu:main",
       }),
