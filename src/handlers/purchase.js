@@ -83,7 +83,7 @@ export async function showProducts(env, telegram, chatId, messageId, categoryId)
     return;
   }
   const buttons = products.map((p) => ({
-    text: `${p.name} — ${toman(p.price)}`,
+    text: `${p.name} - ${toman(p.price)}`,
     data: `buy:prod:${p.id}`,
   }));
   await telegram.editOrSend(chatId, messageId, "یک محصول را انتخاب کنید:", {
