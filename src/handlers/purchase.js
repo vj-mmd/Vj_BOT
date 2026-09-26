@@ -67,7 +67,7 @@ export async function showCategories(env, telegram, chatId, messageId) {
     .sort((a, b) => (a.order || 0) - (b.order || 0))
     .map((c) => ({ text: c.name, data: `buy:cat:${c.id}` }));
 
-  await telegram.editOrSend(chatId, messageId, "🛒 یک دسته‌بندی را انتخاب کنید:", {
+  await telegram.editOrSend(chatId, messageId, "💥 یک دسته‌بندی را انتخاب کنید:", {
     reply_markup: keyboard(buttons, { back: "menu:main" }),
   });
 }
