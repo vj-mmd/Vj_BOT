@@ -21,7 +21,7 @@ export async function showTestMenu(env, telegram, chatId, messageId) {
   const settings = await getSettings(env.BOT_KV);
   const text =
     `🔍 حجم تست: ${settings.test_volume_gb}MB\n` +
-    `〽️ مدت تست: ${settings.test_duration_days} روز\n` +
+    `〽️ مدت تست: ${settings.test_duration_days} روز\n`;
 
   const kb = keyboard([{ text: "🎁 دریافت اکانت تست", data: "test:get" }], { back: "menu:main" });
   await telegram.editOrSend(chatId, messageId, text, { reply_markup: kb });
