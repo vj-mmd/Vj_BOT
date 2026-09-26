@@ -31,12 +31,12 @@ export async function sendJoinPrompt(env, telegram, chatId, missing) {
 export async function mainMenuKeyboard() {
   return keyboard(
     [
-      { text: "🎁 اکانت تست", data: "test:main" },
-      { text: "🛒 خرید اشتراک", data: "buy:categories" },
-      { text: "👥 دعوت دوستان", data: "invite:main" },
-      { text: "💼 کیف پول", data: "wallet:main" },
-      { text: "📦 سرویس‌های من", data: "svc:list" },
-      { text: "💬 پشتیبانی", data: "support:main" },
+      { text: "🦠 اکانت تست", data: "test:main" },
+      { text: "💥 خرید اشتراک", data: "buy:categories" },
+      { text: "🗣 دعوت دوستان", data: "invite:main" },
+      { text: "💸 کیف پول", data: "wallet:main" },
+      { text: "🔍 سرویس‌های من", data: "svc:list" },
+      { text: "☎️ پشتیبانی", data: "support:main" },
     ],
     { perRow: 2 }
   );
