@@ -6,43 +6,32 @@
 
 import { getSettings } from "./kv.js";
 
-// Cache the bot username so we don't call getMe on every report.
-let cachedBotUsername = null;
+// Zero-width space — used to force a visible blank line in Telegram,
+// because Telegram strips empty lines under HTML parse_mode.
+const BLANK = "\u200B";
 
-async function getBotUsername(telegram) {
-  if (cachedBotUsername) return cachedBotUsername;
-  try {
-    const me = await telegram.getMe();
-    cachedBotUsername = me.username || null;
-  } catch (e) {
-    console.log("getMe failed", e);
-  }
-  return cachedBotUsername;
-}
+// ربات یوزرنیم (بدون @) — برای دکمه «ثبت سفارش»
+const BOT_USERNAME = "Vj_PANEL_BOT";
 
-async function orderKeyboard(telegram) {
-  const username = await getBotUsername(telegram);
-  if (!username) return undefined; // no button if we can't resolve username
-  return {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          {
-            text: "🛒 ثبت سفارش",
-            url: `https://t.me/${username}?start=order`,
-          },
-        ],
+const orderKeyboard = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        {
+          text: "🛒 ثبت سفارش",
+          url: `https://t.me/${BOT_USERNAME}?start=order`,
+        },
       ],
-    },
-  };
-}
+    ],
+  },
+};
 
 async function postReport(env, telegram, lines, withButton = false) {
   const settings = await getSettings(env.BOT_KV);
   if (!settings.report_channel_id) return;
   const text = lines.filter(Boolean).join("\n");
   try {
-    const extra = withButton ? await orderKeyboard(telegram) : {};
+    const extra = withButton ? orderKeyboard : {};
     await telegram.sendMessage(settings.report_channel_id, text, {
       parse_mode: "HTML",
       ...extra,
@@ -69,10 +58,11 @@ export async function reportPurchase(env, telegram, user, product, price) {
     telegram,
     [
       "گزارش خرید موفق✅",
-      "",
+      BLANK,
       `👀خریدار : <code>${user.id}</code>`,
       `🛍سفارش : ${product.name}`,
       `💵مبلغ پرداخت شده : ${price.toLocaleString("en-US")} تومان`,
+      BLANK,
       `⏱تاریخ و ساعت : ${nowTehran()}`,
     ],
     true
@@ -85,22 +75,19 @@ export async function reportRenewal(env, telegram, user, product, price) {
     telegram,
     [
       "گزارش تمدید موفق✅",
-      "",
+      BLANK,
       `👀خریدار : <code>${user.id}</code>`,
       `🛍سفارش : ${product.name}`,
       `💵مبلغ پرداخت شده : ${price.toLocaleString("en-US")} تومان`,
+      BLANK,
       `⏱تاریخ و ساعت : ${nowTehran()}`,
     ],
     true
   );
 }
 
+// Wallet charge reports are intentionally disabled.
+// Kept as a no-op so existing callers don't break.
 export async function reportWalletCharge(env, telegram, user, amount) {
-  await postReport(env, telegram, [
-    "💳 <b>شارژ کیف پول</b>",
-    "",
-    `👤 نام: ${user.first_name || "-"}`,
-    `🔢 آیدی عددی: <code>${user.id}</code>`,
-    `💰 مبلغ شارژ: ${amount.toLocaleString("en-US")} تومان`,
-  ]);
+  return;
 }
