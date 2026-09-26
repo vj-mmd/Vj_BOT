@@ -41,7 +41,6 @@ export async function showServiceDetail(env, telegram, chatId, messageId, servic
     `📉 مصرف: ${(service.used_gb || 0).toFixed(2)}GB\n` +
     `📈 باقی‌مانده: ${Math.max(0, service.volume_gb - (service.used_gb || 0)).toFixed(2)}GB\n` +
     `⏳ انقضا: ${new Date(service.expires_at).toLocaleDateString("fa-IR")}\n` +
-    `وضعیت: ${statusLabel(service)}`;
 
   const buttons = [
     { text: "🔗 Subscription", url: service.subscription_url },
