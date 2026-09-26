@@ -187,6 +187,8 @@ async function onMessage(env, telegram, message) {
       return adminSettings.handleSettingValueInput(env, telegram, message, state);
     case "admin_set_text":
       return adminSettings.handleTextValueInput(env, telegram, message, state);
+    case "admin_log_forward":
+      return adminSettings.handleLogGroupForward(env, telegram, message, state);
     case "admin_ticket_reply":
       return adminTickets.handleTicketReplyInput(env, telegram, message, state);
     default:
@@ -377,6 +379,12 @@ async function onAdminCallback(env, telegram, cq, p, ack) {
   if (data === "admin:set:gateway") { await ack(); return adminSettings.toggleGateway(env, telegram, chatId, messageId, adminId); }
   if (data === "admin:set:texts") { await ack(); return adminSettings.showTextsMenu(env, telegram, chatId, messageId); }
   if (p[1] === "text" && p[2] === "field") { await ack(); return adminSettings.promptTextValue(env, telegram, chatId, messageId, adminId, p[3]); }
+
+  // log group
+  if (data === "admin:set:log") { await ack(); return adminSettings.showLogGroupMenu(env, telegram, chatId, messageId); }
+  if (data === "admin:log:setup") { await ack(); return adminSettings.promptLogGroupSetup(env, telegram, chatId, messageId, adminId); }
+  if (data === "admin:log:rebuild") { await ack(); return adminSettings.rebuildLogTopics(env, telegram, chatId, messageId, adminId); }
+  if (data === "admin:log:clear") { await ack(); return adminSettings.clearLogSettings(env, telegram, chatId, messageId, adminId); }
 
   // stats / audit
   if (data === "admin:stats") { await ack(); return adminStats.showStats(env, telegram, chatId, messageId); }
