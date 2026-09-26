@@ -1,6 +1,7 @@
 import { keyboard } from "../../lib/keyboards.js";
 import { setState, clearState } from "../../lib/state.js";
 import { getSettings, saveSettings, getTexts, saveTexts, logAction } from "../../lib/kv.js";
+import { setupLogTopics, setLogChannel, setLogTopics } from "../../lib/log.js";
 
 const SETTING_FIELDS = [
   { key: "min_charge", label: "💰 حداقل شارژ", numeric: true },
@@ -18,6 +19,7 @@ export async function showSettingsMenu(env, telegram, chatId, messageId) {
   const buttons = SETTING_FIELDS.map((f) => ({ text: f.label, data: `admin:set:field:${f.key}` }));
   buttons.push({ text: "🌐 وضعیت درگاه آنلاین", data: "admin:set:gateway" });
   buttons.push({ text: "📝 متن‌های ربات", data: "admin:set:texts" });
+  buttons.push({ text: "📊 گروه لاگ", data: "admin:set:log" });
 
   await telegram.editOrSend(chatId, messageId, "⚙️ <b>تنظیمات</b>", {
     reply_markup: keyboard(buttons, { perRow: 1, back: "admin:main" }),
@@ -66,6 +68,133 @@ export async function toggleGateway(env, telegram, chatId, messageId, adminId) {
     { reply_markup: keyboard([{ text: "تغییر وضعیت", data: "admin:set:gateway" }], { perRow: 1, back: "admin:settings" }) }
   );
 }
+
+// ─────────────────────────────────────────────
+// 📊 گروه لاگ
+// ─────────────────────────────────────────────
+
+export async function showLogGroupMenu(env, telegram, chatId, messageId) {
+  const settings = await getSettings(env.BOT_KV);
+  const status = settings.log_channel_id
+    ? `🟢 فعال\n🆔 <code>${settings.log_channel_id}</code>\n📂 تعداد تاپیک: ${Object.keys(settings.log_topics || {}).length}`
+    : "🔴 غیرفعال";
+
+  const buttons = [
+    { text: "🆔 تنظیم گروه (Forward)", data: "admin:log:setup" },
+    { text: "🔄 ساخت مجدد تاپیک‌ها", data: "admin:log:rebuild" },
+    { text: "🗑 حذف تنظیمات", data: "admin:log:clear" },
+  ];
+
+  await telegram.editOrSend(
+    chatId,
+    messageId,
+    `📊 <b>گروه لاگ</b>\n\nوضعیت: ${status}\n\nبا زدن «🆔 تنظیم گروه»، یه پیام از گروه لاگ رو برام <b>Forward</b> کن.`,
+    { reply_markup: keyboard(buttons, { perRow: 1, back: "admin:settings" }) }
+  );
+}
+
+export async function promptLogGroupSetup(env, telegram, chatId, messageId, adminId) {
+  await setState(env, adminId, { step: "admin_log_forward" });
+  await telegram.editOrSend(
+    chatId,
+    messageId,
+    "📊 <b>تنظیم گروه لاگ</b>\n\n" +
+      "لطفاً یه پیام از <b>گروه Forum</b> که ربات توش ادمین هست رو برام <b>Forward</b> کن.\n\n" +
+      "⚠️ ربات باید دسترسی <b>Manage Topics</b> داشته باشه.\n\n" +
+      "برای لغو، دکمه بازگشت رو بزن.",
+    { reply_markup: keyboard([], { back: "admin:set:log" }) }
+  );
+}
+
+export async function handleLogGroupForward(env, telegram, message, state) {
+  const chatId = message.chat.id;
+  const adminId = message.from.id;
+  await clearState(env, adminId);
+
+  const forwardedChat = message.forward_from_chat;
+  if (!forwardedChat) {
+    await telegram.sendMessage(chatId, "❌ این پیام از گروه Forward نشده. دوباره تلاش کن.", {
+      reply_markup: keyboard([{ text: "📋 بازگشت", data: "admin:set:log" }], { perRow: 1 }),
+    });
+    return;
+  }
+
+  const logChatId = forwardedChat.id;
+
+  await setLogChannel(env, logChatId);
+
+  await telegram.sendMessage(chatId, "⏳ در حال ساخت تاپیک‌ها...");
+
+  const topics = await setupLogTopics(env, telegram, logChatId);
+
+  if (Object.keys(topics).length === 0) {
+    await telegram.sendMessage(
+      chatId,
+      "❌ هیچ تاپیکی ساخته نشد.\n\nمطمئن شو:\n" +
+        "• گروه <b>Forum</b> هست (Topics فعال)\n" +
+        "• ربات <b>ادمین</b> هست\n" +
+        "• ربات دسترسی <b>Manage Topics</b> داره",
+      { reply_markup: keyboard([{ text: "📋 بازگشت", data: "admin:set:log" }], { perRow: 1 }) }
+    );
+    return;
+  }
+
+  await setLogTopics(env, topics);
+
+  await logAction(env.BOT_KV, adminId, "setup_log_group", { chat_id: logChatId, topics });
+
+  const topicList = Object.keys(topics)
+    .map((k) => `✅ ${k}`)
+    .join("\n");
+
+  await telegram.sendMessage(
+    chatId,
+    `✅ <b>گروه لاگ با موفقیت تنظیم شد</b>\n\n` +
+      `🆔 <code>${logChatId}</code>\n` +
+      `📂 تعداد تاپیک‌های ساخته شده: ${Object.keys(topics).length}\n\n` +
+      `<b>تاپیک‌ها:</b>\n${topicList}`,
+    { reply_markup: keyboard([{ text: "📋 بازگشت", data: "admin:set:log" }], { perRow: 1 }) }
+  );
+}
+
+export async function rebuildLogTopics(env, telegram, chatId, messageId, adminId) {
+  const settings = await getSettings(env.BOT_KV);
+  if (!settings.log_channel_id) {
+    await telegram.editOrSend(chatId, messageId, "❌ اول گروه لاگ رو تنظیم کن.", {
+      reply_markup: keyboard([], { back: "admin:set:log" }),
+    });
+    return;
+  }
+
+  await telegram.editOrSend(chatId, messageId, "⏳ در حال ساخت مجدد تاپیک‌ها...");
+
+  const topics = await setupLogTopics(env, telegram, settings.log_channel_id);
+  await setLogTopics(env, topics);
+  await logAction(env.BOT_KV, adminId, "rebuild_log_topics", topics);
+
+  await telegram.editOrSend(
+    chatId,
+    messageId,
+    `✅ ${Object.keys(topics).length} تاپیک ساخته شد.`,
+    { reply_markup: keyboard([{ text: "📋 بازگشت", data: "admin:set:log" }], { perRow: 1 }) }
+  );
+}
+
+export async function clearLogSettings(env, telegram, chatId, messageId, adminId) {
+  const settings = await getSettings(env.BOT_KV);
+  settings.log_channel_id = null;
+  settings.log_topics = {};
+  await saveSettings(env.BOT_KV, settings);
+  await logAction(env.BOT_KV, adminId, "clear_log_settings", null);
+
+  await telegram.editOrSend(chatId, messageId, "🗑 تنظیمات گروه لاگ حذف شد.", {
+    reply_markup: keyboard([{ text: "📋 بازگشت", data: "admin:set:log" }], { perRow: 1 }),
+  });
+}
+
+// ─────────────────────────────────────────────
+// 📝 متن‌ها
+// ─────────────────────────────────────────────
 
 const TEXT_KEYS = [
   { key: "welcome", label: "🎃 پیام خوش‌آمدگویی" },
