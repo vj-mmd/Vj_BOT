@@ -65,17 +65,41 @@ export function tg(env) {
       return api("setWebhook", { url, secret_token: secret });
     },
 
+    // ─────── Forum Topics ───────
+    createForumTopic(chatId, name, iconColor = 0x6FB9F0) {
+      return api("createForumTopic", {
+        chat_id: chatId,
+        name,
+        icon_color: iconColor,
+      });
+    },
+
+    editForumTopic(chatId, messageThreadId, name) {
+      return api("editForumTopic", {
+        chat_id: chatId,
+        message_thread_id: messageThreadId,
+        name,
+      });
+    },
+
+    closeForumTopic(chatId, messageThreadId) {
+      return api("closeForumTopic", {
+        chat_id: chatId,
+        message_thread_id: messageThreadId,
+      });
+    },
+
     // Try to edit; if the message can't be edited (too old / not found), send a new one instead.
-// If Telegram just says "not modified" (content is identical), that's not a
-// real failure - do nothing instead of spamming a duplicate message.
-async editOrSend(chatId, messageId, text, extra = {}) {
-  if (messageId) {
-    const r = await this.editMessageText(chatId, messageId, text, extra);
-    if (r.ok) return r;
-    const desc = (r.description || "").toLowerCase();
-    if (desc.includes("message is not modified")) return r;
-  }
-  return this.sendMessage(chatId, text, extra);
-},
+    // If Telegram just says "not modified" (content is identical), that's not a
+    // real failure - do nothing instead of spamming a duplicate message.
+    async editOrSend(chatId, messageId, text, extra = {}) {
+      if (messageId) {
+        const r = await this.editMessageText(chatId, messageId, text, extra);
+        if (r.ok) return r;
+        const desc = (r.description || "").toLowerCase();
+        if (desc.includes("message is not modified")) return r;
+      }
+      return this.sendMessage(chatId, text, extra);
+    },
   };
 }
