@@ -8,7 +8,7 @@ function toman(n) {
 
 export async function showWallet(env, telegram, chatId, messageId, userId) {
   const user = await getUser(env.BOT_KV, userId);
-  const text = `💼 <b>کیف پول شما</b>\n\n💰 موجودی: ${toman(user.balance)}`;
+  const text = `💸 <b>کیف پول شما</b>\n\n💰 موجودی: ${toman(user.balance)}`;
   const kb = keyboard(
     [
       { text: "💳 شارژ کیف پول", data: "wallet:charge" },
