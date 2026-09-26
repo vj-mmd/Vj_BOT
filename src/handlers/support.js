@@ -17,7 +17,7 @@ export async function showSupportMenu(env, telegram, chatId, messageId) {
     ],
     { back: "menu:main" }
   );
-  await telegram.editOrSend(chatId, messageId, "💬 بخش پشتیبانی را انتخاب کنید:", { reply_markup: kb });
+  await telegram.editOrSend(chatId, messageId, "☎️ بخش پشتیبانی را انتخاب کنید:", { reply_markup: kb });
 }
 
 export async function showFaqList(env, telegram, chatId, messageId) {
