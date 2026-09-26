@@ -20,9 +20,8 @@ async function pickTestProfile(kv) {
 export async function showTestMenu(env, telegram, chatId, messageId) {
   const settings = await getSettings(env.BOT_KV);
   const text =
-    `📦 حجم تست: ${settings.test_volume_gb}MB\n` +
-    `⏳ مدت تست: ${settings.test_duration_days} روز\n` +
-    `🔁 تعداد مجاز: ${settings.test_count} بار`;
+    `🔍 حجم تست: ${settings.test_volume_gb}MB\n` +
+    `〽️ مدت تست: ${settings.test_duration_days} روز\n` +
 
   const kb = keyboard([{ text: "🎁 دریافت اکانت تست", data: "test:get" }], { back: "menu:main" });
   await telegram.editOrSend(chatId, messageId, text, { reply_markup: kb });
@@ -70,9 +69,9 @@ export async function handleTestGet(env, telegram, chatId, messageId, userId) {
 
     const text =
       `✅ اکانت تست شما ساخته شد.\n\n` +
-      `👤 نام کاربری: <code>${result.username}</code>\n` +
-      `📦 حجم: ${settings.test_volume_gb}GB\n` +
-      `⏳ مدت: ${settings.test_duration_days} روز`;
+      `🗣 نام کاربری: <code>${result.username}</code>\n` +
+      `🔍 حجم: ${settings.test_volume_gb}GB\n` +
+      `〽️ مدت: ${settings.test_duration_days} روز`;
 
     const buttons = [{ text: "🔗 Subscription", url: result.subscription_url }];
     let finalText = text;
