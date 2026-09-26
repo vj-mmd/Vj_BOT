@@ -41,7 +41,7 @@ export async function startTicketFlow(env, telegram, chatId, messageId, userId) 
     await telegram.editOrSend(
       chatId,
       messageId,
-      `شما یک تیکت باز دارید (#${existing.id}). پیام بعدی شما به همان تیکت اضافه می‌شود.`,
+      `شما یک تیکت باز دارید پیام بعدی شما به همان تیکت اضافه می‌شود.`,
       { reply_markup: keyboard([], { back: "support:main" }) }
     );
     await setState(env, userId, { step: "await_ticket_message", ticket_id: existing.id });
