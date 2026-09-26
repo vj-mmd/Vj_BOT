@@ -80,7 +80,7 @@ export async function showLogGroupMenu(env, telegram, chatId, messageId) {
     : "🔴 غیرفعال";
 
   const buttons = [
-    { text: "🆔 تنظیم گروه (Forward)", data: "admin:log:setup" },
+    { text: "🆔 تنظیم گروه (ورود دستی)", data: "admin:log:setup" },
     { text: "🔄 ساخت مجدد تاپیک‌ها", data: "admin:log:rebuild" },
     { text: "🗑 حذف تنظیمات", data: "admin:log:clear" },
   ];
@@ -88,7 +88,11 @@ export async function showLogGroupMenu(env, telegram, chatId, messageId) {
   await telegram.editOrSend(
     chatId,
     messageId,
-    `📊 <b>گروه لاگ</b>\n\nوضعیت: ${status}\n\nبا زدن «🆔 تنظیم گروه»، یه پیام از گروه لاگ رو برام <b>Forward</b> کن.`,
+    `📊 <b>گروه لاگ</b>\n\nوضعیت: ${status}\n\n` +
+      `📌 <b>راهنما:</b>\n` +
+      `1. آیدی عددی گروه Forum رو کپی کن (با -100 شروع می‌شه)\n` +
+      `2. دکمه «🆔 تنظیم گروه» رو بزن\n` +
+      `3. آیدی رو بفرست`,
     { reply_markup: keyboard(buttons, { perRow: 1, back: "admin:settings" }) }
   );
 }
@@ -99,9 +103,10 @@ export async function promptLogGroupSetup(env, telegram, chatId, messageId, admi
     chatId,
     messageId,
     "📊 <b>تنظیم گروه لاگ</b>\n\n" +
-      "لطفاً یه پیام از <b>گروه Forum</b> که ربات توش ادمین هست رو برام <b>Forward</b> کن.\n\n" +
-      "⚠️ ربات باید دسترسی <b>Manage Topics</b> داشته باشه.\n\n" +
-      "برای لغو، دکمه بازگشت رو بزن.",
+      "آیدی عددی گروه Forum رو بفرست.\n" +
+      "(باید با <code>-100</code> شروع بشه)\n\n" +
+      "مثال: <code>-1003902163885</code>\n\n" +
+      "⚠️ ربات باید تو گروه ادمین باشه با دسترسی <b>Manage Topics</b>.",
     { reply_markup: keyboard([], { back: "admin:set:log" }) }
   );
 }
@@ -111,18 +116,32 @@ export async function handleLogGroupForward(env, telegram, message, state) {
   const adminId = message.from.id;
   await clearState(env, adminId);
 
-  const forwardedChat = message.forward_from_chat;
-  if (!forwardedChat) {
-    await telegram.sendMessage(chatId, "❌ این پیام از گروه Forward نشده. دوباره تلاش کن.", {
-      reply_markup: keyboard([{ text: "📋 بازگشت", data: "admin:set:log" }], { perRow: 1 }),
-    });
+  let logChatId = null;
+  const rawText = (message.text || "").trim();
+
+  // اگه آیدی عددی دستی فرستاد
+  if (/^-100\d+$/.test(rawText)) {
+    logChatId = rawText;
+  }
+  // اگه Forward کرد (پشتیبانی از هر دو حالت)
+  else if (message.forward_from_chat) {
+    logChatId = String(message.forward_from_chat.id);
+  } else if (message.forward_origin?.type === "chat") {
+    logChatId = String(message.forward_origin.sender_chat.id);
+  }
+
+  if (!logChatId) {
+    await telegram.sendMessage(
+      chatId,
+      "❌ آیدی معتبر نیست.\n\n" +
+        "باید یه آیدی عددی بفرستی که با <code>-100</code> شروع بشه.\n\n" +
+        "مثال: <code>-1003902163885</code>",
+      { reply_markup: keyboard([{ text: "📋 بازگشت", data: "admin:set:log" }], { perRow: 1 }) }
+    );
     return;
   }
 
-  const logChatId = forwardedChat.id;
-
   await setLogChannel(env, logChatId);
-
   await telegram.sendMessage(chatId, "⏳ در حال ساخت تاپیک‌ها...");
 
   const topics = await setupLogTopics(env, telegram, logChatId);
@@ -133,19 +152,17 @@ export async function handleLogGroupForward(env, telegram, message, state) {
       "❌ هیچ تاپیکی ساخته نشد.\n\nمطمئن شو:\n" +
         "• گروه <b>Forum</b> هست (Topics فعال)\n" +
         "• ربات <b>ادمین</b> هست\n" +
-        "• ربات دسترسی <b>Manage Topics</b> داره",
+        "• ربات دسترسی <b>Manage Topics</b> داره\n" +
+        "• آیدی درست وارد شده",
       { reply_markup: keyboard([{ text: "📋 بازگشت", data: "admin:set:log" }], { perRow: 1 }) }
     );
     return;
   }
 
   await setLogTopics(env, topics);
-
   await logAction(env.BOT_KV, adminId, "setup_log_group", { chat_id: logChatId, topics });
 
-  const topicList = Object.keys(topics)
-    .map((k) => `✅ ${k}`)
-    .join("\n");
+  const topicList = Object.keys(topics).map((k) => `✅ ${k}`).join("\n");
 
   await telegram.sendMessage(
     chatId,
