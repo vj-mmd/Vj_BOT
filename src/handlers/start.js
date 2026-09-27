@@ -1,4 +1,5 @@
 import { getOrCreateUser, getUser, saveUser, getTexts } from "../lib/kv.js";
+import { logNewUser } from "../lib/log.js";
 import { checkJoined, sendJoinPrompt, sendMainMenu, proceedAfterJoin } from "./menu.js";
 
 export async function handleStart(env, telegram, message) {
@@ -13,7 +14,16 @@ export async function handleStart(env, telegram, message) {
     if (!Number.isNaN(refId) && refId !== from.id) referredBy = refId;
   }
 
-  const { user } = await getOrCreateUser(env.BOT_KV, from, referredBy);
+  const { user, isNew } = await getOrCreateUser(env.BOT_KV, from, referredBy);
+
+  // 📊 لاگ: کاربر جدید
+  if (isNew) {
+    try {
+      await logNewUser(env, telegram, from);
+    } catch (e) {
+      console.log("logNewUser failed", e);
+    }
+  }
 
   if (user.banned) {
     await telegram.sendMessage(chatId, "⛔ دسترسی شما به ربات مسدود شده است.");
