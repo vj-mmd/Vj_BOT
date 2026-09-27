@@ -39,12 +39,9 @@ export async function showFaqAnswer(env, telegram, chatId, messageId, index) {
 export async function startTicketFlow(env, telegram, chatId, messageId, userId) {
   const existing = await getUserOpenTicket(env.BOT_KV, userId);
   if (existing) {
-    await telegram.editOrSend(
-      chatId,
-      messageId,
-      `شما یک تیکت باز دارید (#${existing.id}). پیام بعدی شما به همان تیکت اضافه می‌شود.`,
-      { reply_markup: keyboard([], { back: "support:main" }) }
-    );
+    await telegram.editOrSend(chatId, messageId, "☎️ پیام خود را برای پشتیبانی ارسال کنید:", {
+      reply_markup: keyboard([], { back: "support:main" }),
+    });
     await setState(env, userId, { step: "await_ticket_message", ticket_id: existing.id });
     return;
   }
