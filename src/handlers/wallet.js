@@ -1,6 +1,7 @@
 import { keyboard } from "../lib/keyboards.js";
 import { setState, clearState } from "../lib/state.js";
 import { getUser, getSettings, createPayment, getAdmins } from "../lib/kv.js";
+import { logWalletCharge } from "../lib/log.js";
 
 function toman(n) {
   return n.toLocaleString("en-US") + " تومان";
@@ -109,6 +110,14 @@ export async function handleReceiptPhoto(env, telegram, message, state) {
 
   await clearState(env, userId);
   await telegram.sendMessage(chatId, "⏳ رسید شما برای بررسی ارسال شد.");
+
+  // 📊 لاگ: شارژ کیف پول (رسید ارسال شد)
+  try {
+    const user = await getUser(env.BOT_KV, userId);
+    await logWalletCharge(env, telegram, user, state.amount);
+  } catch (e) {
+    console.log("logWalletCharge failed", e);
+  }
 
   // Notify admins
   const admins = await getAdmins(env.BOT_KV);
