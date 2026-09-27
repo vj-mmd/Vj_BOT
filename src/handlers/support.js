@@ -1,6 +1,7 @@
 import { keyboard } from "../lib/keyboards.js";
 import { setState, clearState } from "../lib/state.js";
-import { createTicket, getUserOpenTicket, saveTicket, getTicket, getAdmins } from "../lib/kv.js";
+import { createTicket, getUserOpenTicket, saveTicket, getTicket, getAdmins, getUser } from "../lib/kv.js";
+import { logSupport } from "../lib/log.js";
 
 const FAQ = [
   { q: "نحوه اتصال چگونه است؟", a: "لینک Subscription خود را در اپلیکیشن کلاینت (v2rayNG، Streisand، ...) وارد کنید." },
@@ -71,6 +72,16 @@ export async function handleTicketMessageInput(env, telegram, message, state) {
   await clearState(env, userId);
 
   await telegram.sendMessage(chatId, "✅ پیام شما برای پشتیبانی ارسال شد.");
+
+  // 📊 لاگ: پشتیبانی
+  try {
+    const user = await getUser(kv, userId);
+    if (user) {
+      await logSupport(env, telegram, user, text);
+    }
+  } catch (e) {
+    console.log("logSupport failed", e);
+  }
 
   const admins = await getAdmins(kv);
   const kb = keyboard([{ text: "✍️ پاسخ", data: `admin:ticket:reply:${ticket.id}` }], { perRow: 1 });
