@@ -20,11 +20,23 @@ export async function setupLogTopics(env, telegram, chatId) {
   for (const t of DEFAULT_TOPICS) {
     try {
       const res = await telegram.createForumTopic(chatId, t.name);
-      topics[t.key] = res.message_thread_id;
+      console.log(`createForumTopic ${t.name} result:`, JSON.stringify(res));
+      if (res.ok && res.result && res.result.message_thread_id) {
+        topics[t.key] = res.result.message_thread_id;
+      }
     } catch (e) {
       console.log(`failed to create topic ${t.name}`, e);
     }
   }
+  console.log("TOPICS BUILT:", JSON.stringify(topics));
+
+  // ذخیره فوری تو KV
+  const settings = await getSettings(env.BOT_KV);
+  settings.log_channel_id = String(chatId);
+  settings.log_topics = topics;
+  await saveSettings(env.BOT_KV, settings);
+  console.log("TOPICS SAVED TO KV");
+
   return topics;
 }
 
@@ -32,7 +44,7 @@ export async function setupLogTopics(env, telegram, chatId) {
 export async function setLogChannel(env, chatId) {
   const settings = await getSettings(env.BOT_KV);
   settings.log_channel_id = String(chatId);
-  settings.log_topics = {}; // ریست
+  settings.log_topics = {};
   await saveSettings(env.BOT_KV, settings);
 }
 
@@ -46,15 +58,22 @@ export async function setLogTopics(env, topics) {
 // تابع پایه ارسال به تاپیک
 async function postToTopic(env, telegram, topicKey, lines) {
   const settings = await getSettings(env.BOT_KV);
+  console.log("POST TO TOPIC:", JSON.stringify({
+    topicKey,
+    log_channel_id: settings.log_channel_id,
+    log_topics: settings.log_topics,
+    topic_id: settings.log_topics?.[topicKey],
+  }));
   if (!settings.log_channel_id) return;
   const topicId = settings.log_topics?.[topicKey];
   if (!topicId) return;
   const text = lines.filter(Boolean).join("\n");
   try {
-    await telegram.sendMessage(settings.log_channel_id, text, {
+    const r = await telegram.sendMessage(settings.log_channel_id, text, {
       parse_mode: "HTML",
       message_thread_id: topicId,
     });
+    console.log("POST RESULT:", JSON.stringify(r));
   } catch (e) {
     console.log("log topic post failed", e);
   }
