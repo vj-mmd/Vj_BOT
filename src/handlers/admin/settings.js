@@ -18,6 +18,7 @@ const SETTING_FIELDS = [
 export async function showSettingsMenu(env, telegram, chatId, messageId) {
   const buttons = SETTING_FIELDS.map((f) => ({ text: f.label, data: `admin:set:field:${f.key}` }));
   buttons.push({ text: "🌐 وضعیت درگاه آنلاین", data: "admin:set:gateway" });
+  buttons.push({ text: "🎨 رنگ دکمه‌ها", data: "admin:set:styles" });
   buttons.push({ text: "📝 متن‌های ربات", data: "admin:set:texts" });
   buttons.push({ text: "📊 گروه لاگ", data: "admin:set:log" });
 
@@ -70,6 +71,87 @@ export async function toggleGateway(env, telegram, chatId, messageId, adminId) {
 }
 
 // ─────────────────────────────────────────────
+// 🎨 رنگ دکمه‌ها
+// ─────────────────────────────────────────────
+
+const BUTTON_STYLE_ITEMS = [
+  { key: "menu:test",      label: "🦠 اکانت تست" },
+  { key: "menu:buy",       label: "💥 خرید اشتراک" },
+  { key: "menu:invite",    label: "🗣 دعوت دوستان" },
+  { key: "menu:wallet",    label: "💸 کیف پول" },
+  { key: "menu:services",  label: "🔍 سرویس‌های من" },
+  { key: "menu:support",   label: "☎️ پشتیبانی" },
+  { key: "confirm:yes",    label: "✅ دکمه تأیید (بله)" },
+  { key: "confirm:no",     label: "❌ دکمه لغو (خیر)" },
+  { key: "back",           label: "⬅️ دکمه بازگشت" },
+];
+
+const STYLE_LABELS = {
+  default: "⚪ پیش‌فرض",
+  primary: "🔵 آبی",
+  success: "🟢 سبز",
+  danger: "🔴 قرمز",
+};
+
+export async function showButtonStylesMenu(env, telegram, chatId, messageId) {
+  const settings = await getSettings(env.BOT_KV);
+  const styles = settings.button_styles || {};
+
+  const buttons = BUTTON_STYLE_ITEMS.map((item) => {
+    const current = styles[item.key] || "default";
+    return {
+      text: `${item.label} — ${STYLE_LABELS[current] || current}`,
+      data: `admin:style:item:${item.key}`,
+    };
+  });
+
+  await telegram.editOrSend(
+    chatId,
+    messageId,
+    "🎨 <b>رنگ دکمه‌ها</b>\n\n" +
+      "برای هر دکمه، رنگ مورد نظر رو انتخاب کن.\n\n" +
+      "⚠️ <b>نکته:</b> رنگ‌ها فقط تو Bot API 9.0+ و بعضی کلاینت‌ها (مثل نسخه‌های جدید تلگرام) نمایش داده می‌شن.",
+    { reply_markup: keyboard(buttons, { perRow: 1, back: "admin:settings" }) }
+  );
+}
+
+export async function showStylePicker(env, telegram, chatId, messageId, styleKey) {
+  const item = BUTTON_STYLE_ITEMS.find((i) => i.key === styleKey);
+  if (!item) return;
+
+  const settings = await getSettings(env.BOT_KV);
+  const current = settings.button_styles?.[styleKey] || "default";
+
+  const buttons = [
+    { text: `⚪ پیش‌فرض${current === "default" ? " ✅" : ""}`, data: `admin:style:set:${styleKey}:default` },
+    { text: `🔵 آبی${current === "primary" ? " ✅" : ""}`, data: `admin:style:set:${styleKey}:primary` },
+    { text: `🟢 سبز${current === "success" ? " ✅" : ""}`, data: `admin:style:set:${styleKey}:success` },
+    { text: `🔴 قرمز${current === "danger" ? " ✅" : ""}`, data: `admin:style:set:${styleKey}:danger` },
+  ];
+
+  await telegram.editOrSend(
+    chatId,
+    messageId,
+    `🎨 <b>رنگ دکمه: ${item.label}</b>\n\nرنگ فعلی: ${STYLE_LABELS[current] || current}\n\nرنگ جدید رو انتخاب کن:`,
+    { reply_markup: keyboard(buttons, { perRow: 2, back: "admin:set:styles" }) }
+  );
+}
+
+export async function setButtonStyle(env, telegram, chatId, messageId, adminId, styleKey, styleValue) {
+  if (!["default", "primary", "success", "danger"].includes(styleValue)) return;
+
+  const settings = await getSettings(env.BOT_KV);
+  if (!settings.button_styles) settings.button_styles = {};
+  settings.button_styles[styleKey] = styleValue;
+  await saveSettings(env.BOT_KV, settings);
+
+  await logAction(env.BOT_KV, adminId, "set_button_style", { key: styleKey, value: styleValue });
+
+  // برگشت به منوی رنگ‌ها
+  await showButtonStylesMenu(env, telegram, chatId, messageId);
+}
+
+// ─────────────────────────────────────────────
 // 📊 گروه لاگ
 // ─────────────────────────────────────────────
 
@@ -119,12 +201,9 @@ export async function handleLogGroupForward(env, telegram, message, state) {
   let logChatId = null;
   const rawText = (message.text || "").trim();
 
-  // اگه آیدی عددی دستی فرستاد
   if (/^-100\d+$/.test(rawText)) {
     logChatId = rawText;
-  }
-  // اگه Forward کرد (پشتیبانی از هر دو حالت)
-  else if (message.forward_from_chat) {
+  } else if (message.forward_from_chat) {
     logChatId = String(message.forward_from_chat.id);
   } else if (message.forward_origin?.type === "chat") {
     logChatId = String(message.forward_origin.sender_chat.id);
