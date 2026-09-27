@@ -56,7 +56,7 @@ export async function getOrCreateUser(kv, from, referredBy) {
     ref_count: 0,
     ref_earnings: 0,
     created_at: Date.now(),
-    transactions: [], // capped list, most recent first
+    transactions: [],
   };
   await saveUser(kv, user);
   await addToIndex(kv, "index:users", from.id);
@@ -82,7 +82,7 @@ export async function addTransaction(kv, userId, tx) {
   const user = await getUser(kv, userId);
   if (!user) return;
   const before = user.balance;
-  user.balance += tx.amount; // amount can be negative (purchase) or positive (charge/refund/reward)
+  user.balance += tx.amount;
   user.transactions.unshift({
     ...tx,
     balance_before: before,
@@ -135,6 +135,17 @@ const DEFAULT_SETTINGS = {
   report_channel_id: null,
   log_channel_id: null,
   log_topics: {},
+  button_styles: {
+    "menu:test": "default",
+    "menu:buy": "default",
+    "menu:invite": "default",
+    "menu:wallet": "default",
+    "menu:services": "default",
+    "menu:support": "default",
+    "confirm:yes": "success",
+    "confirm:no": "danger",
+    "back": "default",
+  },
 };
 
 export async function getSettings(kv) {
@@ -377,7 +388,7 @@ export async function getUserOpenTicket(kv, userId) {
 // ---------- admins ----------
 
 export async function getAdmins(kv) {
-  return getJSON(kv, "config:admins", []); // [{id, role: 'owner'|'manager'|'support'}]
+  return getJSON(kv, "config:admins", []);
 }
 
 export async function saveAdmins(kv, admins) {
