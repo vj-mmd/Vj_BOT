@@ -1,6 +1,7 @@
 import { keyboard } from "../lib/keyboards.js";
 import { getUser, saveUser, getSettings, getPanelIndex, getPanel, getProfiles, getStats, saveStats } from "../lib/kv.js";
 import { provisionUser } from "../lib/panels/index.js";
+import { logTestAccount } from "../lib/log.js";
 
 // Which panel/profile new test accounts get created on. Kept simple: the
 // first active panel with at least one active profile. For more control,
@@ -66,6 +67,15 @@ export async function handleTestGet(env, telegram, chatId, messageId, userId) {
     const stats = await getStats(kv);
     stats.tests_used += 1;
     await saveStats(kv, stats);
+
+    // 📊 لاگ: اکانت تست
+    try {
+      await logTestAccount(env, telegram, user, {
+        name: `${settings.test_volume_gb}GB / ${settings.test_duration_days} روز`,
+      });
+    } catch (e) {
+      console.log("logTestAccount failed", e);
+    }
 
     const text =
       `✅ اکانت تست شما ساخته شد.\n\n` +
