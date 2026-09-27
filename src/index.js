@@ -34,7 +34,6 @@ export default {
       return new Response("VPN Shop Bot is running.", { status: 200 });
     }
 
-    // Verify the request actually came from Telegram.
     const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
     if (env.WEBHOOK_SECRET && secret !== env.WEBHOOK_SECRET) {
       return new Response("forbidden", { status: 403 });
@@ -59,13 +58,9 @@ export default {
       console.log("UNHANDLED ERROR", err && err.stack ? err.stack : err);
     }
 
-    // Telegram just needs a 200 - errors above are logged, not surfaced to it.
     return new Response("ok", { status: 200 });
   },
 
-  // Optional: enable a Cron Trigger (see wrangler.toml) to sweep expired
-  // services periodically. Safe to leave disabled if you'd rather check
-  // expiry lazily (e.g. only when a user opens "My services").
   async scheduled(event, env, ctx) {
     const telegram = tg(env);
     await sweepExpiredServices(env, telegram);
@@ -111,12 +106,11 @@ async function onMessage(env, telegram, message) {
 
   if (text.startsWith("/start")) return handleStart(env, telegram, message);
 
-  // Phone-verification step: user tapped the "share contact" keyboard button.
   if (message.contact) return handleContact(env, telegram, message);
 
   if (text.startsWith("/admin")) {
     const role = await requireAdmin(env, userId);
-    if (!role) return; // silently ignore for non-admins
+    if (!role) return;
     return showAdminMenu(env, telegram, chatId, null, role);
   }
 
@@ -125,15 +119,13 @@ async function onMessage(env, telegram, message) {
   const user = await getUser(env.BOT_KV, userId);
   if (user && user.banned && !adminRole) return;
 
-  // Forced-join gate applies to regular users; admins mid-flow (e.g. typing a
-  // search query) shouldn't get stuck behind it.
   if (user && !adminRole) {
     const joinStatus = await checkJoined(env, telegram, userId);
     if (!joinStatus.ok) return sendJoinPrompt(env, telegram, chatId, joinStatus.missing);
   }
 
   const state = await getState(env, userId);
-  if (!state) return; // no pending step -> nothing to do with a stray message
+  if (!state) return;
 
   switch (state.step) {
     case "await_discount_code":
@@ -205,15 +197,11 @@ async function onCallback(env, telegram, cq) {
   const data = cq.data || "";
   const p = data.split(":");
 
-  // Always ack quickly so Telegram stops showing the loading spinner;
-  // individual handlers can send a richer answerCallbackQuery themselves
-  // (e.g. with an alert) when they need to.
   const ack = () => telegram.answerCallbackQuery(cq.id, "");
 
   if (data === "join:check") return handleJoinCheck(env, telegram, cq);
   if (data === "rules:accept") return handleRulesAccept(env, telegram, cq);
 
-  // Forced-join gate for every other button.
   const joinStatus = await checkJoined(env, telegram, userId);
   if (!joinStatus.ok) {
     await telegram.answerCallbackQuery(cq.id, "ابتدا در کانال‌ها عضو شوید.", true);
@@ -379,6 +367,11 @@ async function onAdminCallback(env, telegram, cq, p, ack) {
   if (data === "admin:set:gateway") { await ack(); return adminSettings.toggleGateway(env, telegram, chatId, messageId, adminId); }
   if (data === "admin:set:texts") { await ack(); return adminSettings.showTextsMenu(env, telegram, chatId, messageId); }
   if (p[1] === "text" && p[2] === "field") { await ack(); return adminSettings.promptTextValue(env, telegram, chatId, messageId, adminId, p[3]); }
+
+  // button styles
+  if (data === "admin:set:styles") { await ack(); return adminSettings.showButtonStylesMenu(env, telegram, chatId, messageId); }
+  if (p[1] === "style" && p[2] === "item") { await ack(); return adminSettings.showStylePicker(env, telegram, chatId, messageId, p[3]); }
+  if (p[1] === "style" && p[2] === "set") { await ack(); return adminSettings.setButtonStyle(env, telegram, chatId, messageId, adminId, p[3], p[4]); }
 
   // log group
   if (data === "admin:set:log") { await ack(); return adminSettings.showLogGroupMenu(env, telegram, chatId, messageId); }
