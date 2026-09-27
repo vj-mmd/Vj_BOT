@@ -1,5 +1,5 @@
 import { keyboard } from "../lib/keyboards.js";
-import { getChannels, getTexts, getAdminRole, getUser } from "../lib/kv.js";
+import { getChannels, getTexts, getAdminRole, getUser, getSettings } from "../lib/kv.js";
 
 export async function checkJoined(env, telegram, userId) {
   const channels = await getChannels(env.BOT_KV);
@@ -19,7 +19,7 @@ export async function checkJoined(env, telegram, userId) {
 
 export function joinKeyboard(missing) {
   const buttons = missing.map((c) => ({ text: `📢 عضویت در ${c.name}`, url: c.invite_url }));
-  buttons.push({ text: "✅ بررسی عضویت", data: "join:check" });
+  buttons.push({ text: "✅ بررسی عضویت", data: "join:check", style: "success" });
   return keyboard(buttons, { perRow: 1 });
 }
 
@@ -31,7 +31,7 @@ export async function sendJoinPrompt(env, telegram, chatId, missing) {
 // ---- rules acceptance ("glass"/inline button) ----
 
 export function rulesKeyboard() {
-  return { inline_keyboard: [[{ text: "✅ می‌پذیرم", callback_data: "rules:accept" }]] };
+  return { inline_keyboard: [[{ text: "✅ می‌پذیرم", callback_data: "rules:accept", style: "success" }]] };
 }
 
 export async function sendRulesPrompt(env, telegram, chatId) {
@@ -65,15 +65,17 @@ export async function proceedAfterJoin(env, telegram, chatId, userId) {
   return sendMainMenu(env, telegram, chatId, null);
 }
 
-export async function mainMenuKeyboard() {
+export async function mainMenuKeyboard(env) {
+  const settings = await getSettings(env.BOT_KV);
+  const s = settings.button_styles || {};
   return keyboard(
     [
-      { text: "🦠 اکانت تست", data: "test:main" },
-      { text: "💥 خرید اشتراک", data: "buy:categories" },
-      { text: "🗣 دعوت دوستان", data: "invite:main" },
-      { text: "💸 کیف پول", data: "wallet:main" },
-      { text: "🔍 سرویس‌های من", data: "svc:list" },
-      { text: "☎️ پشتیبانی", data: "support:main" },
+      { text: "🦠 اکانت تست", data: "test:main", style: s["menu:test"] },
+      { text: "💥 خرید اشتراک", data: "buy:categories", style: s["menu:buy"] },
+      { text: "🗣 دعوت دوستان", data: "invite:main", style: s["menu:invite"] },
+      { text: "💸 کیف پول", data: "wallet:main", style: s["menu:wallet"] },
+      { text: "🔍 سرویس‌های من", data: "svc:list", style: s["menu:services"] },
+      { text: "☎️ پشتیبانی", data: "support:main", style: s["menu:support"] },
     ],
     { perRow: 2 }
   );
@@ -81,7 +83,7 @@ export async function mainMenuKeyboard() {
 
 export async function sendMainMenu(env, telegram, chatId, messageId) {
   const texts = await getTexts(env.BOT_KV);
-  const kb = await mainMenuKeyboard();
+  const kb = await mainMenuKeyboard(env);
   await telegram.editOrSend(chatId, messageId, texts.welcome, { reply_markup: kb });
 }
 
