@@ -1,6 +1,7 @@
 import { keyboard } from "../lib/keyboards.js";
 import { setState, getState, clearState } from "../lib/state.js";
 import { reportPurchase } from "../lib/report.js";
+import { logPurchase, logFailedPurchase } from "../lib/log.js";
 import {
   getCategories,
   listProductsByCategory,
@@ -252,6 +253,13 @@ export async function handlePurchaseConfirm(env, telegram, chatId, messageId, us
       chatId,
       "⚠️ خرید ثبت شد اما پنل/پروفایل این محصول تنظیم نشده. پشتیبانی به‌زودی سرویس شما را فعال می‌کند."
     );
+
+    // 📊 لاگ: خرید ناموفق
+    try {
+      await logFailedPurchase(env, telegram, user, product, "پنل یا پروفایل تنظیم نشده");
+    } catch (e) {
+      console.log("logFailedPurchase failed", e);
+    }
     return;
   }
 
@@ -288,6 +296,13 @@ export async function handlePurchaseConfirm(env, telegram, chatId, messageId, us
     await maybeRewardReferrer(kv, userId, finalPrice);
     await reportPurchase(env, telegram, user, product, finalPrice);
 
+    // 📊 لاگ: خرید موفق
+    try {
+      await logPurchase(env, telegram, user, product, finalPrice);
+    } catch (e) {
+      console.log("logPurchase failed", e);
+    }
+
     const text =
       `📦 سرویس شما ساخته شد!\n\n` +
       `👤 نام کاربری: <code>${service.username}</code>\n` +
@@ -308,5 +323,12 @@ export async function handlePurchaseConfirm(env, telegram, chatId, messageId, us
       chatId,
       "⚠️ پرداخت شما ثبت شد اما در ساخت سرویس مشکلی پیش آمد. پشتیبانی به‌زودی پیگیری می‌کند."
     );
+
+    // 📊 لاگ: خرید ناموفق
+    try {
+      await logFailedPurchase(env, telegram, user, product, String(e).slice(0, 200));
+    } catch (err) {
+      console.log("logFailedPurchase failed", err);
+    }
   }
 }
