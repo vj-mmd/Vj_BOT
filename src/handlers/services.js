@@ -2,6 +2,7 @@ import { keyboard } from "../lib/keyboards.js";
 import { getUserServices, getService, getPanel, saveService, getUser, saveUser, addTransaction, getProduct } from "../lib/kv.js";
 import { adapterFor } from "../lib/panels/index.js";
 import { reportRenewal } from "../lib/report.js";
+import { logRenewal } from "../lib/log.js";
 
 function toman(n) {
   return `${n.toLocaleString("en-US")} تومان`;
@@ -179,6 +180,14 @@ export async function confirmRenew(env, telegram, chatId, messageId, userId, ser
   }
 
   await reportRenewal(env, telegram, user, product, product.price);
+
+  // 📊 لاگ: تمدید
+  try {
+    await logRenewal(env, telegram, user, product, product.price);
+  } catch (e) {
+    console.log("logRenewal failed", e);
+  }
+
   await telegram.answerCallbackQuery(callbackQueryId, "✅ سرویس تمدید شد");
   await showServiceDetail(env, telegram, chatId, messageId, serviceId);
 }
