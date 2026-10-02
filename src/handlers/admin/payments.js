@@ -51,7 +51,7 @@ export async function showPaymentDetail(env, telegram, chatId, messageId, paymen
   }
 }
 
-export async function approvePayment(env, telegram, chatId, adminId, paymentId) {
+export async function approvePayment(env, telegram, chatId, adminId, paymentId, automated = false) {
   const kv = env.BOT_KV;
   const payment = await getPayment(kv, paymentId);
   if (!payment || payment.status !== "pending") return;
@@ -74,11 +74,13 @@ export async function approvePayment(env, telegram, chatId, adminId, paymentId) 
   const chargedUser = await getUser(kv, payment.user_id);
   if (chargedUser) await reportWalletCharge(env, telegram, chargedUser, payment.amount);
 
-  await telegram.sendMessage(payment.user_id, `✅ پرداخت تأیید شد.\n💰 مبلغ ${payment.amount.toLocaleString("en-US")} تومان به کیف پول شما اضافه شد.`);
-  await telegram.sendMessage(chatId, "✅ پرداخت تأیید و ثبت شد.");
+  await telegram.sendMessage(payment.user_id, automated
+    ? `✅ پرداخت شما به‌صورت خودکار تأیید شد.\n💰 مبلغ ${payment.amount.toLocaleString("en-US")} تومان به کیف پول شما اضافه شد.`
+    : `✅ پرداخت تأیید شد.\n💰 مبلغ ${payment.amount.toLocaleString("en-US")} تومان به کیف پول شما اضافه شد.`);
+  if (chatId && !automated) await telegram.sendMessage(chatId, "✅ پرداخت تأیید و ثبت شد.");
 }
 
-export async function rejectPayment(env, telegram, chatId, adminId, paymentId) {
+export async function rejectPayment(env, telegram, chatId, adminId, paymentId, automated = false) {
   const kv = env.BOT_KV;
   const payment = await getPayment(kv, paymentId);
   if (!payment || payment.status !== "pending") return;
@@ -88,6 +90,8 @@ export async function rejectPayment(env, telegram, chatId, adminId, paymentId) {
   await resolvePayment(kv, paymentId);
   await logAction(kv, adminId, "reject_payment", paymentId);
 
-  await telegram.sendMessage(payment.user_id, "❌ رسید پرداخت شما رد شد. در صورت اشتباه با پشتیبانی تماس بگیرید.");
-  await telegram.sendMessage(chatId, "❌ پرداخت رد شد.");
+  await telegram.sendMessage(payment.user_id, automated
+    ? "❌ رسید پرداخت شما به‌صورت خودکار رد شد؛ اطلاعات رسید با سفارش مطابقت نداشت."
+    : "❌ رسید پرداخت شما رد شد. در صورت اشتباه با پشتیبانی تماس بگیرید.");
+  if (chatId && !automated) await telegram.sendMessage(chatId, "❌ پرداخت رد شد.");
 }
