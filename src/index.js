@@ -302,9 +302,7 @@ async function onCallback(env, telegram, cq) {
   const p = data.split(":");
 
   if (isBack) {
-    await telegram.clearChatHistory(chatId, [messageId]);
-    await clearState(env, userId);
-  }
+    await telegram.clearChatHistory(chatId, [], [messageId]);
 
   const ack = () => telegram.answerCallbackQuery(cq.id, "");
 
