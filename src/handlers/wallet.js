@@ -1,4 +1,4 @@
-import { keyboard } from "../lib/keyboards.js";
+import { keyboard, rows } from "../lib/keyboards.js";
 import { setState, clearState } from "../lib/state.js";
 import {
   getUser, getSettings, getTexts, render, createPayment, savePayment, getAdmins,
@@ -43,26 +43,64 @@ export async function showChargeOptions(env, telegram, chatId, messageId) {
 export async function showGatewayNotice(env, telegram, chatId, messageId) {
   const settings = await getSettings(env.BOT_KV); const texts = await getTexts(env.BOT_KV);
   if (!settings.online_gateway_enabled || !env.ZARINPAL_MERCHANT_ID) return telegram.editOrSend(chatId,messageId,texts.wallet_gateway_not_ready,{reply_markup:keyboard([{text:"💳 کارت‌به‌کارت",data:"wallet:charge:card"}],{perRow:1,back:"wallet:charge"})});
-  const buttons=AMOUNT_OPTIONS.map(a=>({text:toman(a),data:`wallet:gateway:amt:${a}`})); buttons.push({text:"💰 مبلغ دلخواه",data:"wallet:gateway:custom"});
-  await telegram.editOrSend(chatId,messageId,"🌐 <b>پرداخت آنلاین</b>\n\nمبلغ شارژ کیف پول را انتخاب کنید:",{reply_markup:keyboard(buttons,{perRow:2,back:"wallet:charge"})});
+  return showKeypad(env, telegram, chatId, messageId, "g", 0);
 }
 
 const AMOUNT_OPTIONS = [100000, 200000, 500000, 1000000];
 
-export async function showCardToCard(env, telegram, chatId, messageId) {
+// ---------- numeric keypad for choosing the charge amount ----------
+// Amount lives inside callback_data (wallet:kp:<mode>:<amount>:<action>), so no
+// session state is needed. mode: c = card-to-card, g = online gateway.
+const KEYPAD_MAX = 999999999;
+
+async function showKeypad(env, telegram, chatId, messageId, mode, amount) {
   const settings = await getSettings(env.BOT_KV);
+  const min = Number(settings.min_charge || 0);
+  const cur = Math.min(KEYPAD_MAX, Math.max(0, Number(amount) || 0));
   const text =
-    `💳 <b>اطلاعات پرداخت</b>\n\n` +
-    `شماره کارت:\n<code>${settings.card_number}</code>\n\n` +
-    `به نام: ${settings.card_holder}\n\n` +
-    `مبلغ مورد نظر برای شارژ را انتخاب کنید:`;
+    `⚡ <b>مبلغ مورد نظر را وارد کنید:</b>\n\n` +
+    `حداقل شارژ: ${toman(min)}\n` +
+    `مبلغ انتخاب شده: ${toman(cur)}`;
+  const digit = (d) => ({ text: String(d), data: `wallet:kp:${mode}:${cur}:d${d}` });
+  const inline_keyboard = [
+    ...rows([1, 2, 3, 4, 5, 6, 7, 8, 9].map(digit), 3),
+    ...rows([digit(0)], 1),
+    ...rows([
+      { text: "پاک کردن", data: `wallet:kp:${mode}:${cur}:clr`, style: "danger" },
+      { text: "تایید", data: `wallet:kp:${mode}:${cur}:ok`, style: "success" },
+    ], 2),
+    ...keyboard([], { back: "wallet:charge" }).inline_keyboard,
+  ];
+  await telegram.editOrSend(chatId, messageId, text, { reply_markup: { inline_keyboard } });
+}
 
-  const buttons = AMOUNT_OPTIONS.map((a) => ({ text: toman(a), data: `wallet:amt:${a}` }));
-  buttons.push({ text: "💰 مبلغ دلخواه", data: "wallet:amt:custom" });
+export async function handleKeypad(env, telegram, chatId, messageId, userId, callbackQueryId, mode, curToken, action) {
+  const cur = Math.min(KEYPAD_MAX, Math.max(0, parseInt(curToken, 10) || 0));
+  mode = mode === "g" ? "g" : "c";
 
-  await telegram.editOrSend(chatId, messageId, text, {
-    reply_markup: keyboard(buttons, { back: "wallet:charge" }),
-  });
+  if (action === "ok") {
+    const settings = await getSettings(env.BOT_KV);
+    const min = Number(settings.min_charge || 0);
+    if (!cur || cur < min) {
+      return telegram.answerCallbackQuery(callbackQueryId, `❌ حداقل مبلغ شارژ ${toman(min)} می‌باشد.`, true);
+    }
+    await telegram.answerCallbackQuery(callbackQueryId, "");
+    if (mode === "g") return startGatewayAmount(env, telegram, chatId, messageId, userId, cur);
+    return beginReceiptFlow(env, telegram, chatId, messageId, userId, cur);
+  }
+
+  await telegram.answerCallbackQuery(callbackQueryId, "");
+  let next = cur;
+  if (action === "clr") next = 0;
+  else if (/^d\d$/.test(action || "")) {
+    const candidate = cur * 10 + Number(action[1]);
+    if (candidate <= KEYPAD_MAX) next = candidate;
+  }
+  return showKeypad(env, telegram, chatId, messageId, mode, next);
+}
+
+export async function showCardToCard(env, telegram, chatId, messageId) {
+  return showKeypad(env, telegram, chatId, messageId, "c", 0);
 }
 
 export async function handleAmountChosen(env, telegram, chatId, messageId, userId, amountToken) {
@@ -96,15 +134,20 @@ export async function handleCustomAmountInput(env, telegram, message) {
 async function beginReceiptFlow(env, telegram, chatId, messageId, userId, amount) {
   const texts = await getTexts(env.BOT_KV);
   const settings = await getSettings(env.BOT_KV);
+  const cardInfo =
+    `💳 <b>اطلاعات پرداخت</b>\n\n` +
+    `💰 مبلغ: ${toman(amount)}\n\n` +
+    `شماره کارت:\n<code>${settings.card_number}</code>\n\n` +
+    `به نام: ${settings.card_holder}\n\n`;
   if (settings.card_last4_required !== false) {
     await setState(env, userId, { step: "await_card_last4", amount });
     await telegram.editOrSend(chatId, messageId,
-      "💳 لطفاً ۴ رقم آخر کارتی که با آن پرداخت می‌کنید را ارسال کنید.",
+      cardInfo + "پس از واریز، لطفاً ۴ رقم آخر کارتی که با آن پرداخت کردید را ارسال کنید.",
       { reply_markup: keyboard([], { back: "wallet:charge:card" }) });
     return;
   }
   await setState(env, userId, { step: "await_receipt_photo", amount });
-  await telegram.editOrSend(chatId, messageId, texts.wallet_receipt_prompt, {
+  await telegram.editOrSend(chatId, messageId, cardInfo + texts.wallet_receipt_prompt, {
     reply_markup: keyboard([], { back: "wallet:charge:card" }),
   });
 }
