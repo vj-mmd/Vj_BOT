@@ -1,0 +1,41 @@
+name = "vpn-shop-bot"
+main = "src/index.js"
+compatibility_date = "2024-09-01"
+
+# --- KV Namespaces ---
+# Create these with:
+#   npx wrangler kv namespace create BOT_KV
+#   npx wrangler kv namespace create BOT_SESSIONS
+# then paste the returned ids below.
+kv_namespaces = [
+  { binding = "BOT_KV", id = "2dc3b08851bf4d86b542cb1334b8381d" },
+  { binding = "BOT_SESSIONS", id = "c52b2e299f194abfb106edcddeb3aa55" }
+]
+
+# --- Secrets (set with `npx wrangler secret put NAME`, do NOT put real values here) ---
+# BOT_TOKEN          -> Telegram bot token from @BotFather
+# WEBHOOK_SECRET     -> random string, used to verify Telegram calls
+# OWNER_ID           -> your numeric Telegram user id (first Owner admin)
+
+[vars]
+# Non-secret defaults (safe to keep in this file)
+BOT_NAME = "Vj"
+BOT_USERNAME = "Vj_PANEL_BOT"
+
+# Periodic expiry reminders / cleanup
+[triggers]
+crons = ["*/15 * * * *"]
+
+# --- Durable Object for serialized wallet operations / short locks ---
+[[durable_objects.bindings]]
+name = "WALLET_LOCK"
+class_name = "WalletLock"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["WalletLock"]
+
+# Optional online gateway configuration:
+# PUBLIC_BASE_URL = "https://your-worker.example.com"
+# ZARINPAL_MERCHANT_ID must be stored as a secret.
+# ZARINPAL_SANDBOX = "true" for sandbox testing.
