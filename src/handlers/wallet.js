@@ -66,8 +66,8 @@ async function showKeypad(env, telegram, chatId, messageId, mode, amount) {
     ...rows([1, 2, 3, 4, 5, 6, 7, 8, 9].map(digit), 3),
     ...rows([digit(0)], 1),
     ...rows([
-      { text: "پاک کردن", data: `wallet:kp:${mode}:${cur}:clr`, style: "danger" },
-      { text: "تایید", data: `wallet:kp:${mode}:${cur}:ok`, style: "success" },
+      { text: "پاک کردن", data: `wallet:kp:${mode}:${cur}:clr`, style: "default" },
+      { text: "تایید", data: `wallet:kp:${mode}:${cur}:ok`, style: "default" },
     ], 2),
     ...keyboard([], { back: "wallet:charge" }).inline_keyboard,
   ];
