@@ -1,3367 +1,435 @@
-import { tg } from "./lib/telegram.js";
-import { keyboard } from "./lib/keyboards.js";
-import { getState, clearState } from "./lib/state.js";
-import { render } from "./lib/kv.js";
-import { getUser, getActiveServiceIndex, getService, saveService, getPanel, getTexts, getSettings, isFeatureEnabled } from "./lib/kv.js";
-import { adapterFor } from "./lib/panels/index.js";
-import { loadRuntimeSettings } from "./lib/styles.js";
-import { supportReply } from "./lib/ai.js";
+import { keyboard, rows } from "../lib/keyboards.js";
+import { setState, clearState } from "../lib/state.js";
+import {
+  getUser, getSettings, getTexts, render, createPayment, savePayment, getAdmins,
+  getPaymentByReceiptHash, claimReceiptHashSafe, getPaymentByReceiptFileId, claimReceiptFileIdSafe,
+  getPaymentByReceiptReference, claimReceiptReferenceSafe,
+} from "../lib/kv.js";
+import { logWalletCharge } from "../lib/log.js";
+import { analyzeReceipt, downloadTelegramImage } from "../lib/ai.js";
+import { requestPayment, verifyPayment, startUrl } from "../lib/gateway/zarinpal.js";
+import { withUserLock } from "../lib/locks.js";
+import { getPayment, resolvePayment, getStats, saveStats, claimPaymentCharge, addTransaction } from "../lib/kv.js";
 
-import { handleStart, handleJoinCheck, handleRulesAccept, handleContact } from "./handlers/start.js";
-import { sendMainMenu, checkJoined, sendJoinPrompt } from "./handlers/menu.js";
-import { showTestMenu, handleTestGet } from "./handlers/test.js";
-import * as purchase from "./handlers/purchase.js";
-import * as wallet from "./handlers/wallet.js";
-import { showReferral } from "./handlers/referral.js";
-import * as services from "./handlers/services.js";
-import * as support from "./handlers/support.js";
-
-import { requireAdmin, showAdminMenu } from "./handlers/admin/index.js";
-import * as adminUsers from "./handlers/admin/users.js";
-import * as adminProducts from "./handlers/admin/products.js";
-import * as adminCategories from "./handlers/admin/categories.js";
-import * as adminPanels from "./handlers/admin/panels.js";
-import * as adminProfiles from "./handlers/admin/profiles.js";
-import * as adminDiscounts from "./handlers/admin/discounts.js";
-import * as adminPayments from "./handlers/admin/payments.js";
-import * as adminBroadcast from "./handlers/admin/broadcast.js";
-import * as adminAdmins from "./handlers/admin/admins.js";
-import * as adminChannels from "./handlers/admin/channels.js";
-import * as adminSettings from "./handlers/admin/settings.js";
-import * as adminFaq from "./handlers/admin/faq.js";
-import * as adminStats from "./handlers/admin/stats.js";
-import * as adminTickets from "./handlers/admin/tickets.js";
-import { showWalletAdminMenu } from "./handlers/admin/walletAdmin.js";
-import * as adminManualSale from "./handlers/admin/manualSale.js";
-import * as adminInventory from "./handlers/admin/inventory.js";
-
-export default {
-  async fetch(request, env, ctx) {
-    if (request.method === "GET") {
-      const url = new URL(request.url);
-      if (url.pathname === "/payments/zarinpal/callback") {
-        const { handleZarinpalCallback } = await import("./handlers/wallet.js");
-        return handleZarinpalCallback(env, tg(env), url);
-      }
-      return new Response("VPN Shop Bot is running.", { status: 200 });
-    }
-    if (request.method !== "POST") {
-      return new Response("VPN Shop Bot is running.", { status: 200 });
-    }
-
-    const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
-    if (env.WEBHOOK_SECRET && secret !== env.WEBHOOK_SECRET) {
-      return new Response("forbidden", { status: 403 });
-    }
-
-    let update;
-    try {
-      update = await request.json();
-    } catch {
-      return new Response("bad request", { status: 400 });
-    }
-
-    const telegram = tg(env);
-
-    try {
-      const settings = await loadRuntimeSettings(env.BOT_KV);
-
-      if (settings.bot_enabled === false) {
-        const fromId = update.message?.from?.id || update.callback_query?.from?.id;
-        const role = fromId ? await requireAdmin(env, fromId) : null;
-
-        if (!role) {
-          const texts = await getTexts(env.BOT_KV);
-
-          if (update.message) {
-            await telegram.sendMessage(
-              update.message.chat.id,
-              texts.bot_off
-            );
-          } else if (update.callback_query) {
-            await telegram.answerCallbackQuery(
-              update.callback_query.id,
-              texts.bot_off,
-              true
-            );
-          }
-
-          return new Response("ok", { status: 200 });
-        }
-      }
-
-      if (update.message) {
-        await onMessage(env, telegram, update.message, ctx);
-      } else if (update.callback_query) {
-        await onCallback(env, telegram, update.callback_query);
-      }
-    } catch (err) {
-      console.log(
-        "UNHANDLED ERROR",
-        err && err.stack ? err.stack : err
-      );
-    }
-
-    return new Response("ok", { status: 200 });
-  },
-
-  async scheduled(event, env, ctx) {
-    const telegram = tg(env);
-
-    await loadRuntimeSettings(env.BOT_KV);
-    await sweepExpiredServices(env, telegram);
-  },
-};
-
-async function sweepExpiredServices(env, telegram) {
-  const kv=env.BOT_KV, settings=await getSettings(kv), ids=await getActiveServiceIndex(kv), now=Date.now();
-  const maxPerRun=20; let cursor=Number(await kv.get("cron:service_cursor")||0); if(cursor>=ids.length)cursor=0;
-  const selected=[]; for(let i=0;i<Math.min(maxPerRun,ids.length);i++)selected.push(ids[(cursor+i)%ids.length]);
-  await kv.put("cron:service_cursor",String(ids.length?((cursor+selected.length)%ids.length):0));
-  for(let i=0;i<selected.length;i+=5){
-    await Promise.all(selected.slice(i,i+5).map(async id=>{
-      const service=await getService(kv,id); if(!service||service.status==="disabled")return;
-      const msLeft=Number(service.expires_at||0)-now;
-      if(msLeft<=0){
-        service.status="disabled"; await saveService(kv,service);
-        const panel=service.panel_id?await getPanel(kv,service.panel_id):null;
-        if(panel){try{const adapter=adapterFor(panel);const profile=service.profile_id?(await (await import("./lib/kv.js")).getProfiles(kv,panel.id)).find(p=>p.id===service.profile_id):null;if(adapter.disableUser){if(panel.type==="threexui")await adapter.disableUser(panel,profile,service.username);else await adapter.disableUser(panel,service.username);}}catch(e){console.log("disable expired service failed",service.id,e);}}
-        await telegram.sendMessage(service.user_id,render((await getTexts(kv)).service_expired,{id:service.id}),{track_history:false}); return;
-      }
-      // Refresh traffic usage. The scheduler is capped and rotated to stay below Worker subrequest limits.
-      try{
-        const panel=service.panel_id?await getPanel(kv,service.panel_id):null;
-        if(panel){const adapter=adapterFor(panel);const profile=service.profile_id?(await (await import("./lib/kv.js")).getProfiles(kv,panel.id)).find(p=>p.id===service.profile_id):null;const remote=panel.type==="threexui"?await adapter.getUser(panel,profile?.inbound_id,service.username):await adapter.getUser(panel,service.username);if(remote){service.used_gb=Number(remote.used_traffic_bytes||0)/1073741824;if(remote.expire)service.expires_at=Number(remote.expire)*1000;await saveService(kv,service);}}
-      }catch(e){console.log("usage sweep failed",service.id,e);}
-      const warningMs=Number(settings.expiry_warning_hours||24)*3600000;
-      if(msLeft<=warningMs&&!service.warned_expiry){service.warned_expiry=true;await saveService(kv,service);await telegram.sendMessage(service.user_id,render((await getTexts(kv)).service_expiry_warning,{id:service.id,hours:settings.expiry_warning_hours}),{track_history:false});}
-      const total=Number(service.volume_gb||0),used=Number(service.used_gb||0),pct=total>0?used/total:0;
-      if(pct>=0.8&&!service.warned_80){service.warned_80=true;await saveService(kv,service);await telegram.sendMessage(service.user_id,render((await getTexts(kv)).service_volume_80,{id:service.id,remaining:Math.max(0,total-used).toFixed(2)}),{reply_markup:keyboard([{text:"➕ افزایش حجم",data:`svc:addvol:${service.id}:1`},{text:"♻️ تمدید سرویس",data:`svc:renew:${service.id}`}],{perRow:2}),track_history:false});}
-      if(pct>=1&&!service.warned_100){service.warned_100=true;await saveService(kv,service);await telegram.sendMessage(service.user_id,render((await getTexts(kv)).service_volume_100,{id:service.id}),{reply_markup:keyboard([{text:"➕ افزایش حجم",data:`svc:addvol:${service.id}:1`},{text:"♻️ تمدید سرویس",data:`svc:renew:${service.id}`}],{perRow:2}),track_history:false});}
-    }));
-  }
+function toman(n) {
+  return n.toLocaleString("en-US") + " تومان";
 }
 
-// ---------------- messages (text / photo) ----------------
+export async function showWallet(env, telegram, chatId, messageId, userId) {
+  const user = await getUser(env.BOT_KV, userId);
+  const text = `💸 <b>کیف پول شما</b>\n\n💰 موجودی: ${toman(user.balance)}`;
+  const kb = keyboard(
+    [
+      { text: "💳 شارژ کیف پول", data: "wallet:charge" },
+      { text: "📜 تراکنش‌ها", data: "wallet:tx" },
+    ],
+    { back: "menu:main" }
+  );
+  await telegram.editOrSend(chatId, messageId, text, { reply_markup: kb });
+}
 
-async function onMessage(env, telegram, message, ctx) {
+export async function showChargeOptions(env, telegram, chatId, messageId) {
+  const buttons = [];
+  const settings = await getSettings(env.BOT_KV);
+  if (settings.features?.card_to_card !== false) buttons.push({ text: "💳 کارت‌به‌کارت", data: "wallet:charge:card" });
+  if (settings.online_gateway_enabled && settings.features?.online_gateway !== false) buttons.push({ text: "🌐 پرداخت آنلاین", data: "wallet:charge:gateway" });
+
+  const texts = await getTexts(env.BOT_KV);
+  await telegram.editOrSend(chatId, messageId, texts.wallet_charge_method_prompt, {
+    reply_markup: keyboard(buttons, { perRow: 1, back: "wallet:main" }),
+  });
+}
+
+export async function showGatewayNotice(env, telegram, chatId, messageId) {
+  const settings = await getSettings(env.BOT_KV); const texts = await getTexts(env.BOT_KV);
+  if (!settings.online_gateway_enabled || !env.ZARINPAL_MERCHANT_ID) return telegram.editOrSend(chatId,messageId,texts.wallet_gateway_not_ready,{reply_markup:keyboard([{text:"💳 کارت‌به‌کارت",data:"wallet:charge:card"}],{perRow:1,back:"wallet:charge"})});
+  return showKeypad(env, telegram, chatId, messageId, "g", 0);
+}
+
+const AMOUNT_OPTIONS = [100000, 200000, 500000, 1000000];
+
+// ---------- numeric keypad for choosing the charge amount ----------
+// Amount lives inside callback_data (wallet:kp:<mode>:<amount>:<action>), so no
+// session state is needed. mode: c = card-to-card, g = online gateway.
+const KEYPAD_MAX = 999999999;
+
+async function showKeypad(env, telegram, chatId, messageId, mode, amount) {
+  const settings = await getSettings(env.BOT_KV);
+  const min = Number(settings.min_charge || 0);
+  const cur = Math.min(KEYPAD_MAX, Math.max(0, Number(amount) || 0));
+  const text =
+    `⚡ <b>مبلغ مورد نظر را وارد کنید:</b>\n\n` +
+    `حداقل شارژ: ${toman(min)}\n` +
+    `مبلغ انتخاب شده: ${toman(cur)}`;
+  const digit = (d) => ({ text: String(d), data: `wallet:kp:${mode}:${cur}:d${d}` });
+  const inline_keyboard = [
+    ...rows([1, 2, 3, 4, 5, 6, 7, 8, 9].map(digit), 3),
+    ...rows([digit(0)], 1),
+    ...rows([
+      { text: "پاک کردن", data: `wallet:kp:${mode}:${cur}:clr`, style: "default" },
+      { text: "تایید", data: `wallet:kp:${mode}:${cur}:ok`, style: "default" },
+    ], 2),
+    ...keyboard([], { back: "wallet:charge" }).inline_keyboard,
+  ];
+  await telegram.editOrSend(chatId, messageId, text, { reply_markup: { inline_keyboard } });
+}
+
+export async function handleKeypad(env, telegram, chatId, messageId, userId, callbackQueryId, mode, curToken, action) {
+  const cur = Math.min(KEYPAD_MAX, Math.max(0, parseInt(curToken, 10) || 0));
+  mode = mode === "g" ? "g" : "c";
+
+  if (action === "ok") {
+    const settings = await getSettings(env.BOT_KV);
+    const min = Number(settings.min_charge || 0);
+    if (!cur || cur < min) {
+      return telegram.answerCallbackQuery(callbackQueryId, `❌ حداقل مبلغ شارژ ${toman(min)} می‌باشد.`, true);
+    }
+    await telegram.answerCallbackQuery(callbackQueryId, "");
+    if (mode === "g") return startGatewayAmount(env, telegram, chatId, messageId, userId, cur);
+    return beginReceiptFlow(env, telegram, chatId, messageId, userId, cur);
+  }
+
+  await telegram.answerCallbackQuery(callbackQueryId, "");
+  let next = cur;
+  if (action === "clr") next = 0;
+  else if (/^d\d$/.test(action || "")) {
+    const candidate = cur * 10 + Number(action[1]);
+    if (candidate <= KEYPAD_MAX) next = candidate;
+  }
+  return showKeypad(env, telegram, chatId, messageId, mode, next);
+}
+
+export async function showCardToCard(env, telegram, chatId, messageId) {
+  return showKeypad(env, telegram, chatId, messageId, "c", 0);
+}
+
+export async function handleAmountChosen(env, telegram, chatId, messageId, userId, amountToken) {
+  if (amountToken === "custom") {
+    const texts = await getTexts(env.BOT_KV);
+    await setState(env, userId, { step: "await_custom_amount" });
+    await telegram.editOrSend(chatId, messageId, texts.wallet_custom_amount_prompt, {
+      reply_markup: keyboard([], { back: "wallet:charge:card" }),
+    });
+    return;
+  }
+  const amount = parseInt(amountToken, 10);
+  await beginReceiptFlow(env, telegram, chatId, messageId, userId, amount);
+}
+
+export async function handleCustomAmountInput(env, telegram, message) {
   const chatId = message.chat.id;
   const userId = message.from.id;
-  const text = message.text || "";
+  const amount = parseInt((message.text || "").replace(/[^\d]/g, ""), 10);
+  const settings = await getSettings(env.BOT_KV);
 
-  // Keep a short private-chat history so /start and Back can clean the UI.
-  await telegram.trackHistory(
-    chatId,
-    message.message_id
-  );
-
-  const commandFeature = /^\/buy(?:@|\s|$)/i.test(text) ? "buy" : /^\/wallet(?:@|\s|$)/i.test(text) ? "wallet" : /^\/test(?:@|\s|$)/i.test(text) ? "test" : /^\/(?:services|myservice)(?:@|\s|$)/i.test(text) ? "services" : /^\/(?:support|help|ticket)(?:@|\s|$)/i.test(text) ? "support" : /^\/faq(?:@|\s|$)/i.test(text) ? "faq" : null;
-  if (commandFeature && !(await isFeatureEnabled(env.BOT_KV,commandFeature))) return sendMainMenu(env,telegram,chatId,null);
-
-  if (text.startsWith("/start")) {
-    await telegram.clearChatHistory(chatId);
-    return handleStart(
-      env,
-      telegram,
-      message
-    );
+  if (!amount || amount < settings.min_charge) {
+    const texts = await getTexts(env.BOT_KV);
+    await telegram.sendMessage(chatId, render(texts.wallet_custom_amount_invalid, { min: toman(settings.min_charge) }));
+    return;
   }
+  await clearState(env, userId);
+  await beginReceiptFlow(env, telegram, chatId, null, userId, amount);
+}
 
-  if (
-    text === "/support" ||
-    text === "/help"
-  ) {
-    const user = await getUser(
-      env.BOT_KV,
-      userId
-    );
-
-    if (!user) {
-      return handleStart(
-        env,
-        telegram,
-        message
-      );
-    }
-
-    const role = await requireAdmin(
-      env,
-      userId
-    );
-
-    if (role) {
-      return telegram.sendMessage(
-        chatId,
-        "پشتیبانی هوشمند برای کاربران عادی فعال است. از بخش تیکت‌های پنل مدیریت استفاده کنید."
-      );
-    }
-
-    const joinStatus = await checkJoined(
-      env,
-      telegram,
-      userId
-    );
-
-    if (!joinStatus.ok) {
-      return sendJoinPrompt(
-        env,
-        telegram,
-        chatId,
-        joinStatus.missing
-      );
-    }
-
-    return support.showSupportMenu(
-      env,
-      telegram,
-      chatId,
-      null
-    );
+async function beginReceiptFlow(env, telegram, chatId, messageId, userId, amount) {
+  const texts = await getTexts(env.BOT_KV);
+  const settings = await getSettings(env.BOT_KV);
+  const cardInfo =
+    `💳 <b>اطلاعات پرداخت</b>\n\n` +
+    `💰 مبلغ: ${toman(amount)}\n\n` +
+    `شماره کارت:\n<code>${settings.card_number}</code>\n\n` +
+    `به نام: ${settings.card_holder}\n\n`;
+  if (settings.card_last4_required !== false) {
+    await setState(env, userId, { step: "await_card_last4", amount });
+    await telegram.editOrSend(chatId, messageId,
+      cardInfo + "پس از واریز، لطفاً ۴ رقم آخر کارتی که با آن پرداخت کردید را ارسال کنید.",
+      { reply_markup: keyboard([], { back: "wallet:charge:card" }) });
+    return;
   }
+  await setState(env, userId, { step: "await_receipt_photo", amount });
+  await telegram.editOrSend(chatId, messageId, cardInfo + texts.wallet_receipt_prompt, {
+    reply_markup: keyboard([], { back: "wallet:charge:card" }),
+  });
+}
 
-  // Direct user commands
-
-  if (
-    /^\/menu(?:@[^\s]+)?$/i.test(text)
-  ) {
-    return sendMainMenu(
-      env,
-      telegram,
-      chatId,
-      null
-    );
+export async function handleCardLast4Input(env, telegram, message, state) {
+  const digits = (message.text || "").replace(/\D/g, "");
+  if (!/^\d{4}$/.test(digits)) {
+    return telegram.sendMessage(message.chat.id, "❌ دقیقاً ۴ رقم آخر کارت را بفرستید.");
   }
+  const texts = await getTexts(env.BOT_KV);
+  await setState(env, message.from.id, { step: "await_receipt_photo", amount: state.amount, card_last4: digits });
+  await telegram.sendMessage(message.chat.id, texts.wallet_receipt_prompt, {
+    reply_markup: keyboard([], { back: "wallet:charge:card" }),
+  });
+}
 
-  if (
-    /^\/buy(?:@[^\s]+)?$/i.test(text)
-  ) {
-    const user = await getUser(
-      env.BOT_KV,
-      userId
-    );
-
-    if (!user) {
-      return handleStart(
-        env,
-        telegram,
-        message
-      );
-    }
-
-    const joinStatus = await checkJoined(
-      env,
-      telegram,
-      userId
-    );
-
-    if (!joinStatus.ok) {
-      return sendJoinPrompt(
-        env,
-        telegram,
-        chatId,
-        joinStatus.missing
-      );
-    }
-
-    return purchase.showCategories(
-      env,
-      telegram,
-      chatId,
-      null
-    );
+export async function handleReceiptPhoto(env, telegram, message, state) {
+  const chatId = message.chat.id;
+  const userId = message.from.id;
+  const photo = message.photo[message.photo.length - 1];
+  const kv = env.BOT_KV;
+  const settings = await getSettings(kv);
+  const texts = await getTexts(kv);
+  const rateKey = `rate:receipt:${userId}`;
+  const now = Date.now();
+  const recent = await kv.get(rateKey, "json");
+  const attempts = Array.isArray(recent) ? recent.filter(t => now - t < 3600000) : [];
+  if (attempts.length >= Number(settings.rate_limits?.receipt_per_hour || 5)) {
+    await clearState(env, userId);
+    await telegram.sendMessage(chatId, "⏳ تعداد ارسال رسید شما در یک ساعت اخیر زیاد بوده است. بعداً دوباره تلاش کنید.");
+    return;
   }
+  attempts.push(now); await kv.put(rateKey, JSON.stringify(attempts), { expirationTtl: 3600 });
 
-  if (
-    /^\/wallet(?:@[^\s]+)?$/i.test(text)
-  ) {
-    const user = await getUser(
-      env.BOT_KV,
-      userId
-    );
-
-    if (!user) {
-      return handleStart(
-        env,
-        telegram,
-        message
-      );
-    }
-
-    const joinStatus = await checkJoined(
-      env,
-      telegram,
-      userId
-    );
-
-    if (!joinStatus.ok) {
-      return sendJoinPrompt(
-        env,
-        telegram,
-        chatId,
-        joinStatus.missing
-      );
-    }
-
-    return wallet.showWallet(
-      env,
-      telegram,
-      chatId,
-      null,
-      userId
-    );
-  }
-
-  if (
-    /^\/test(?:@[^\s]+)?$/i.test(text)
-  ) {
-    const user = await getUser(
-      env.BOT_KV,
-      userId
-    );
-
-    if (!user) {
-      return handleStart(
-        env,
-        telegram,
-        message
-      );
-    }
-
-    const joinStatus = await checkJoined(
-      env,
-      telegram,
-      userId
-    );
-
-    if (!joinStatus.ok) {
-      return sendJoinPrompt(
-        env,
-        telegram,
-        chatId,
-        joinStatus.missing
-      );
-    }
-
-    return showTestMenu(
-      env,
-      telegram,
-      chatId,
-      null
-    );
-  }
-
-  if (
-    /^\/(?:services|myservice)(?:@[^\s]+)?$/i.test(text)
-  ) {
-    const user = await getUser(
-      env.BOT_KV,
-      userId
-    );
-
-    if (!user) {
-      return handleStart(
-        env,
-        telegram,
-        message
-      );
-    }
-
-    const joinStatus = await checkJoined(
-      env,
-      telegram,
-      userId
-    );
-
-    if (!joinStatus.ok) {
-      return sendJoinPrompt(
-        env,
-        telegram,
-        chatId,
-        joinStatus.missing
-      );
-    }
-
-    return services.showServiceList(
-      env,
-      telegram,
-      chatId,
-      null,
-      userId
-    );
-  }
-
-  if (
-    /^\/faq(?:@[^\s]+)?$/i.test(text)
-  ) {
-    const user = await getUser(
-      env.BOT_KV,
-      userId
-    );
-
-    if (!user) {
-      return handleStart(
-        env,
-        telegram,
-        message
-      );
-    }
-
-    const joinStatus = await checkJoined(
-      env,
-      telegram,
-      userId
-    );
-
-    if (!joinStatus.ok) {
-      return sendJoinPrompt(
-        env,
-        telegram,
-        chatId,
-        joinStatus.missing
-      );
-    }
-
-    return support.showFaqList(
-      env,
-      telegram,
-      chatId,
-      null
-    );
-  }
-
-  if (
-    /^\/ticket(?:@[^\s]+)?$/i.test(text)
-  ) {
-    const user = await getUser(
-      env.BOT_KV,
-      userId
-    );
-
-    if (!user) {
-      return handleStart(
-        env,
-        telegram,
-        message
-      );
-    }
-
-    const joinStatus = await checkJoined(
-      env,
-      telegram,
-      userId
-    );
-
-    if (!joinStatus.ok) {
-      return sendJoinPrompt(
-        env,
-        telegram,
-        chatId,
-        joinStatus.missing
-      );
-    }
-
-    return support.startTicketFlow(
-      env,
-      telegram,
-      chatId,
-      null,
-      userId
-    );
-  }
-
-  if (message.contact) {
-    return handleContact(
-      env,
-      telegram,
-      message
-    );
-  }
-
-  if (text.startsWith("/admin")) {
-    const role = await requireAdmin(
-      env,
-      userId
-    );
-
-    if (!role) {
-      return;
-    }
-
-    return showAdminMenu(
-      env,
-      telegram,
-      chatId,
-      null,
-      role
-    );
-  }
-
-  const adminRole = await requireAdmin(
-    env,
-    userId
-  );
-
-  const user = await getUser(
-    env.BOT_KV,
-    userId
-  );
-
-  if (
-    user &&
-    user.banned &&
-    !adminRole
-  ) {
+  // Download and fingerprint the exact Telegram image before creating a new
+  // payment. A receipt image is globally single-use, regardless of user.
+  let imageDataUrl = null;
+  let receiptHash = null;
+  try {
+    const downloaded = await downloadTelegramImage(env, telegram, photo.file_id);
+    imageDataUrl = downloaded.dataUrl;
+    receiptHash = downloaded.sha256;
+  } catch (e) {
+    console.log("RECEIPT IMAGE DOWNLOAD ERROR", e?.stack || e);
+    const payment = await createPayment(kv, {
+      user_id: userId,
+      method: "card_to_card",
+      amount: state.amount,
+      card_last4: state.card_last4 || null,
+      receipt_file_id: photo.file_id,
+      ai_status: "review",
+      ai_result: { decision: "review", reason: "receipt image could not be downloaded" },
+    });
+    await clearState(env, userId);
+    await telegram.sendMessage(chatId, texts.wallet_receipt_received, { reply_markup: keyboard([{ text: "🏠 منوی اصلی", data: "menu:main" }], { perRow: 1 }) });
+    await notifyAdminsForReview(env, telegram, payment, photo.file_id, userId, state, "خطا در دریافت تصویر رسید");
     return;
   }
 
-  if (
-    user &&
-    !adminRole
-  ) {
-    const joinStatus = await checkJoined(
-      env,
-      telegram,
-      userId
+  // Exact image replay check. This is intentionally global: the same receipt
+  // must never credit two payments or two users.
+  const previousByHash = await getPaymentByReceiptHash(kv, receiptHash);
+  const previousByFileId = await getPaymentByReceiptFileId(kv, photo.file_id);
+  const previousReceipt = previousByHash || previousByFileId;
+  if (previousReceipt) {
+    await clearState(env, userId);
+    await telegram.sendMessage(
+      chatId,
+      previousReceipt.status === "approved"
+        ? "❌ این تصویر رسید قبلاً برای یک پرداخت استفاده و تأیید شده است. کیف پول دوباره شارژ نمی‌شود."
+        : "❌ این تصویر رسید قبلاً ثبت شده است و امکان استفاده مجدد از آن وجود ندارد."
     );
-
-    if (!joinStatus.ok) {
-      return sendJoinPrompt(
-        env,
-        telegram,
-        chatId,
-        joinStatus.missing
-      );
-    }
-  }
-
-  const state = await getState(
-    env,
-    userId
-  );
-
-  if (!state) {
     return;
   }
 
-  switch (state.step) {
-    case "await_discount_code":
-      return purchase.handleDiscountCodeInput(
-        env,
-        telegram,
-        message,
-        state
-      );
+  const payment = await createPayment(kv, {
+    user_id: userId,
+    method: "card_to_card",
+    amount: state.amount,
+    card_last4: state.card_last4 || null,
+    receipt_file_id: photo.file_id,
+    receipt_sha256: receiptHash,
+    ai_status: settings.receipt_ai_enabled ? "processing" : "review",
+  });
+  const hashClaimed = await claimReceiptHashSafe(env, receiptHash, payment.id);
+  const fileClaimed = await claimReceiptFileIdSafe(env, photo.file_id, payment.id);
+  if (!hashClaimed || !fileClaimed) {
+    const existing = (await getPaymentByReceiptHash(kv, receiptHash)) || (await getPaymentByReceiptFileId(kv, photo.file_id));
+    await clearState(env, userId);
+    await telegram.sendMessage(chatId, existing?.status === "approved"
+      ? "❌ این رسید قبلاً استفاده و تأیید شده است. کیف پول دوباره شارژ نمی‌شود."
+      : "❌ این رسید قبلاً ثبت شده و قابل استفاده مجدد نیست.");
+    return;
+  }
+  await clearState(env, userId);
+  await telegram.sendMessage(chatId, texts.wallet_receipt_received, { reply_markup: keyboard([{ text: "🏠 منوی اصلی", data: "menu:main" }], { perRow: 1 }) });
 
-    case "await_gateway_amount":
-      return wallet.handleGatewayCustomAmountInput(env, telegram, message);
-
-    case "await_custom_amount":
-      return wallet.handleCustomAmountInput(
-        env,
-        telegram,
-        message
-      );
-
-    case "await_card_last4":
-      return wallet.handleCardLast4Input(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "await_receipt_photo":
-      if (!message.photo) {
-        const texts = await getTexts(
-          env.BOT_KV
-        );
-
-        return telegram.sendMessage(
-          chatId,
-          texts.wallet_receipt_need_photo
-        );
-      }
-
-      ctx.waitUntil(
-        wallet
-          .handleReceiptPhoto(
-            env,
-            telegram,
-            message,
-            state
-          )
-          .catch(async (e) => {
-            console.log(
-              "RECEIPT PROCESSING ERROR",
-              e?.stack || e
-            );
-
-            try {
-              await telegram.sendMessage(
-                chatId,
-                "⚠️ در پردازش رسید خطایی رخ داد. رسید شما برای بررسی دستی ثبت شده است."
-              );
-            } catch (notifyError) {
-              console.log(
-                "RECEIPT ERROR NOTIFY FAILED",
-                notifyError
-              );
-            }
-          })
-      );
-
-      return;
-
-    case "await_ticket_message":
-      return support.handleTicketMessageInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "await_support_ai":
-      return support.handleAISupportMessage(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    // ---- admin text-input steps ----
-
-    case "admin_search_user":
-      return adminUsers.handleSearchInput(
-        env,
-        telegram,
-        message
-      );
-
-    case "admin_balance_amount":
-      return adminUsers.handleBalanceAmountInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_add_category":
-    case "admin_rename_category":
-      return adminCategories.handleCategoryTextInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_add_product_name":
-    case "admin_add_product_price":
-    case "admin_add_product_volume":
-    case "admin_add_product_days":
-    case "admin_add_product_protocol":
-    case "admin_add_product_desc":
-      return adminProducts.handleProductTextInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_edit_product_field":
-      return adminProducts.handleProductEditInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_add_panel_name":
-    case "admin_add_panel_url":
-    case "admin_add_panel_user":
-    case "admin_add_panel_pass":
-      return adminPanels.handlePanelTextInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_add_profile_name":
-      return adminProfiles.handleProfileTextInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_add_disc_code":
-    case "admin_add_disc_value":
-    case "admin_add_disc_maxuses":
-    case "admin_add_disc_days":
-      return adminDiscounts.handleDiscountTextInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_broadcast_message":
-      return adminBroadcast.handleBroadcastContent(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_broadcast_buttons":
-      ctx.waitUntil(
-        adminBroadcast
-          .handleBroadcastButtons(
-            env,
-            telegram,
-            message,
-            state
-          )
-          .catch((e) => {
-            console.log(
-              "BROADCAST PROCESSING ERROR",
-              e?.stack || e
-            );
-
-            telegram
-              .sendMessage(
-                chatId,
-                "⁈ ارسال پیام همگانی با خطا متوقف شد."
-              )
-              .catch(() => {});
-          })
-      );
-
-      return;
-
-    case "admin_add_admin_id":
-      return adminAdmins.handleAdminIdInput(
-        env,
-        telegram,
-        message
-      );
-
-    case "admin_manual_sale_user":
-      return adminManualSale.handleUser(
-        env,
-        telegram,
-        message
-      );
-
-    case "admin_add_chan_name":
-    case "admin_add_chan_id":
-    case "admin_add_chan_url":
-      return adminChannels.handleChannelTextInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_inv_add":
-      return adminInventory.handleAdd(env, telegram, message, state);
-
-    case "admin_custom_field":
-      return adminSettings.handleCustomFieldInput(env, telegram, message, state);
-
-    case "admin_set_field":
-      return adminSettings.handleSettingValueInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_set_text":
-      return adminSettings.handleTextValueInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_set_emoji":
-      return adminSettings.handleEmojiValueInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_set_ai_key":
-      return adminSettings.handleAIKeyInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_log_forward":
-      return adminSettings.handleLogGroupForward(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_faq_add_q":
-    case "admin_faq_add_a":
-      return adminFaq.handleFaqAddInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_faq_edit":
-      return adminFaq.handleFaqEditInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    case "admin_ticket_reply":
-      return adminTickets.handleTicketReplyInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
-    default: {
-      const settings = await getSettings(
-        env.BOT_KV
-      );
-
-      if (
-        !adminRole &&
-        settings.support_ai_enabled &&
-        (message.text || "").trim()
-      ) {
-        try {
-          const reply = await supportReply(
-            env,
-            message.text,
-            `User id: ${userId}`
-          );
-
-          if (reply) {
-            return telegram.sendMessage(
-              chatId,
-              reply
-            );
-          }
-        } catch (e) {
-          console.log(
-            "AI support failed",
-            e
-          );
+  let ai = null;
+  try {
+    if (settings.receipt_ai_enabled) {
+      ai = await analyzeReceipt(env, {
+        imageDataUrl,
+        expected: {
+          amount: state.amount,
+          card_last4: state.card_last4 || null,
+          card_holder: settings.card_holder,
+          shop_card: settings.card_number,
+        },
+      });
+      payment.ai_result = ai;
+      payment.ai_status = ai.decision;
+      if (ai.reference) {
+        const previousByReference = await getPaymentByReceiptReference(kv, ai.reference);
+        if (previousByReference && previousByReference.id !== payment.id) {
+          payment.ai_status = "reject";
+          payment.ai_result = {
+            ...ai,
+            decision: "reject",
+            reason: "شماره مرجع/پیگیری این رسید قبلاً استفاده شده است.",
+          };
+          await savePayment(kv, payment);
+          const { rejectPayment } = await import("./admin/payments.js");
+          await rejectPayment(env, telegram, chatId, 0, payment.id, true);
+          return;
+        }
+        const referenceClaimed = await claimReceiptReferenceSafe(env, ai.reference, payment.id);
+        if (!referenceClaimed) {
+          payment.ai_status = "reject";
+          payment.ai_result = {
+            ...ai,
+            decision: "reject",
+            reason: "شماره مرجع/پیگیری این رسید قبلاً استفاده شده است.",
+          };
+          await savePayment(kv, payment);
+          const { rejectPayment } = await import("./admin/payments.js");
+          await rejectPayment(env, telegram, chatId, 0, payment.id, true);
+          return;
         }
       }
+      await savePayment(kv, payment);
+    }
+  } catch (e) {
+    console.log("RECEIPT AI ERROR", e?.stack || e);
+    payment.ai_status = "review";
+    payment.ai_result = { decision: "review", reason: String(e?.message || e).slice(0, 500) };
+    await savePayment(kv, payment);
+  }
 
-      if (
-        !adminRole &&
-        settings.auto_clean
-      ) {
-        try {
-          await telegram.deleteMessage(
-            chatId,
-            message.message_id
-          );
-        } catch {}
-
-        return sendMainMenu(
-          env,
-          telegram,
-          chatId,
-          null
-        );
-      }
-
+  // Hard verification rules are independent of admin status. An admin account
+  // and a regular account go through exactly the same receipt decision path.
+  if (ai?.decision === "approve") {
+    const amountOK = Number(ai.amount_toman) === Number(state.amount);
+    const cardOK = !state.card_last4 || normalizeDigits(ai.card_last4) === normalizeDigits(state.card_last4);
+    const relatedOK = ai.related === true;
+    const confidenceOK = Number(ai.confidence || 0) >= 0.85;
+    if (amountOK && cardOK && relatedOK && confidenceOK) {
+      payment.auto_approved = true;
+      await savePayment(kv, payment);
+      const { approvePayment } = await import("./admin/payments.js");
+      await approvePayment(env, telegram, chatId, 0, payment.id, true);
       return;
     }
-  }
-}
-
-// ---------------- callback_query (button taps) ----------------
-
-async function onCallback(
-  env,
-  telegram,
-  cq
-) {
-  const chatId =
-    cq.message.chat.id;
-
-  const messageId =
-    cq.message.message_id;
-
-  const userId =
-    cq.from.id;
-
-  const rawData =
-    cq.data || "";
-
-  const isBack =
-    rawData.startsWith(
-      "__back__:"
-    );
-
-  const data = isBack
-    ? rawData.slice(
-        "__back__:".length
-      )
-    : rawData;
-
-  const p =
-    data.split(":");
-
-  if (isBack) {
-    await telegram.clearChatHistory(
-      chatId,
-      [],
-      [messageId]
-    );
-
-    await clearState(
-      env,
-      userId
-    );
+    // AI cannot override the hard rules. A genuine receipt with an unreadable
+    // field goes to manual review rather than being silently rejected.
+    payment.ai_status = "review";
+    payment.ai_result = {
+      ...ai,
+      decision: "review",
+      reason: "AI approval failed hard verification rules (amount/card/related/confidence).",
+    };
+    await savePayment(kv, payment);
   }
 
-  const ack = () =>
-    telegram.answerCallbackQuery(
-      cq.id,
-      ""
-    );
-
-  if (
-    data === "join:check"
-  ) {
-    return handleJoinCheck(
-      env,
-      telegram,
-      cq
-    );
-  }
-
-  if (
-    data === "rules:accept"
-  ) {
-    return handleRulesAccept(
-      env,
-      telegram,
-      cq
-    );
-  }
-
-  const joinStatus =
-    await checkJoined(
-      env,
-      telegram,
-      userId
-    );
-
-  if (!joinStatus.ok) {
-    await telegram.answerCallbackQuery(cq.id,"ابتدا در کانال‌ها عضو شوید.",true);
-    return sendJoinPrompt(env,telegram,chatId,joinStatus.missing);
-  }
-  const featureMap = rawData.startsWith("buy:") ? "buy" : rawData.startsWith("wallet:") ? "wallet" : rawData.startsWith("test:") ? "test" : rawData.startsWith("svc:") ? "services" : rawData.startsWith("invite:") ? "referral" : (rawData.startsWith("support:") ? (rawData.startsWith("support:faq") ? "faq" : "support") : null);
-  if (featureMap && !(await isFeatureEnabled(env.BOT_KV,featureMap))) {
-    await telegram.answerCallbackQuery(cq.id,"این قابلیت فعلاً غیرفعال است.",true);
-    return sendMainMenu(env,telegram,chatId,messageId);
-  }
-
-  // ---- user-facing menu ----
-
-  if (
-    data === "menu:main"
-  ) {
-    await ack();
-
-    return sendMainMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "test:main"
-  ) {
-    await ack();
-
-    return showTestMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "test:get"
-  ) {
-    await ack();
-
-    return handleTestGet(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId
-    );
-  }
-
-  if (
-    data === "buy:categories"
-  ) {
-    await ack();
-
-    return purchase.showCategories(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    p[0] === "buy" &&
-    p[1] === "cat"
-  ) {
-    await ack();
-
-    return purchase.showProducts(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[2],
-        10
-      )
-    );
-  }
-
-  if (
-    p[0] === "buy" &&
-    p[1] === "prod"
-  ) {
-    await ack();
-
-    return purchase.showProductDetail(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[2],
-        10
-      )
-    );
-  }
-
-  if (
-    p[0] === "buy" &&
-    p[1] === "discount"
-  ) {
-    await ack();
-
-    return purchase.promptDiscountCode(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId,
-      parseInt(
-        p[2],
-        10
-      )
-    );
-  }
-
-  if (
-    p[0] === "buy" &&
-    p[1] === "pay"
-  ) {
-    await ack();
-
-    return purchase.showPayConfirm(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId,
-      parseInt(
-        p[2],
-        10
-      ),
-      p[3]
-    );
-  }
-
-  if (
-    p[0] === "buy" &&
-    p[1] === "confirm"
-  ) {
-    await ack();
-
-    return purchase.handlePurchaseConfirm(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId,
-      parseInt(
-        p[2],
-        10
-      ),
-      p[3],
-      cq.id
-    );
-  }
-
-  if (data === "buy:custom:main") { await ack(); return purchase.showCustomVolume(env, telegram, chatId, messageId); }
-  if (p[0] === "buy" && p[1] === "custom" && p[2] !== undefined && p[3] !== undefined) { await ack(); return purchase.showCustomVolume(env, telegram, chatId, messageId, Number(p[2]), Number(p[3])); }
-  if (p[0] === "buy" && p[1] === "custompay") { await ack(); return purchase.showCustomPay(env, telegram, chatId, messageId, userId, Number(p[2]), Number(p[3])); }
-  if (p[0] === "buy" && p[1] === "customconfirm") { await ack(); return purchase.confirmCustomPurchase(env, telegram, chatId, messageId, userId, Number(p[2]), Number(p[3]), cq.id); }
-
-  if (
-    data === "wallet:main"
-  ) {
-    await ack();
-
-    return wallet.showWallet(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId
-    );
-  }
-
-  if (
-    data === "wallet:charge"
-  ) {
-    await ack();
-
-    return wallet.showChargeOptions(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "wallet:charge:card"
-  ) {
-    await ack();
-
-    return wallet.showCardToCard(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "wallet:charge:gateway"
-  ) {
-    await ack();
-
-    return wallet.showGatewayNotice(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (p[0] === "wallet" && p[1] === "kp") { return wallet.handleKeypad(env, telegram, chatId, messageId, userId, cq.id, p[2], p[3], p[4]); }
-  if (p[0] === "wallet" && p[1] === "gateway" && p[2] === "amt") { await ack(); return wallet.startGatewayAmount(env,telegram,chatId,messageId,userId,Number(p[3])); }
-  if (data === "wallet:gateway:custom") { await ack(); await setState(env,userId,{step:"await_gateway_amount"}); return telegram.editOrSend(chatId,messageId,(await getTexts(env.BOT_KV)).wallet_custom_amount_prompt,{reply_markup:keyboard([], {back:"wallet:charge:gateway"})}); }
-  if (p[0] === "wallet" && p[1] === "gateway" && p[2] === "go") { await ack(); return wallet.startGatewayPayment(env,telegram,chatId,messageId,userId,Number(p[3])); }
-
-  if (
-    p[0] === "wallet" &&
-    p[1] === "amt"
-  ) {
-    await ack();
-
-    return wallet.handleAmountChosen(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId,
-      p[2]
-    );
-  }
-
-  if (p[0] === "wallet" && p[1] === "tx" && p[2] !== undefined) {
-    await ack();
-    return wallet.showTransactionDetail(env, telegram, chatId, messageId, userId, p[2]);
-  }
-
-  if (
-    data === "wallet:tx"
-  ) {
-    await ack();
-
-    return wallet.showTransactions(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId
-    );
-  }
-
-  if (
-    data === "invite:main"
-  ) {
-    await ack();
-
-    return showReferral(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId
-    );
-  }
-
-  if (
-    data === "invite:stats"
-  ) {
-    await ack();
-
-    return showReferral(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId
-    );
-  }
-
-  if (
-    data === "svc:list"
-  ) {
-    await ack();
-
-    return services.showServiceList(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId
-    );
-  }
-
-  if (
-    p[0] === "svc" &&
-    p[1] === "view"
-  ) {
-    await ack();
-
-    return services.showServiceDetail(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[2],
-        10
-      )
-    );
-  }
-
-  if (
-    p[0] === "svc" &&
-    p[1] === "refresh"
-  ) {
-    await ack();
-
-    return services.refreshService(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[2],
-        10
-      )
-    );
-  }
-
-  if (p[0] === "svc" && p[1] === "deleteconfirm") { await ack(); return services.confirmDeleteService(env,telegram,chatId,messageId,userId,Number(p[2])); }
-  if (p[0] === "svc" && p[1] === "delete") { await ack(); return services.deleteService(env,telegram,chatId,messageId,userId,Number(p[2])); }
-  if (p[0] === "svc" && p[1] === "revoke") { await ack(); return services.regenerateSubscription(env,telegram,chatId,messageId,userId,Number(p[2])); }
-
-  if (
-    p[0] === "svc" &&
-    p[1] === "renew"
-  ) {
-    await ack();
-
-    return services.promptRenew(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId,
-      parseInt(
-        p[2],
-        10
-      )
-    );
-  }
-
-  if (
-    p[0] === "svc" &&
-    p[1] === "renewconfirm"
-  ) {
-    return services.confirmRenew(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId,
-      parseInt(
-        p[2],
-        10
-      ),
-      cq.id
-    );
-  }
-
-  if (p[0] === "svc" && p[1] === "addvol") { await ack(); return services.showAddVolume(env,telegram,chatId,messageId,userId,Number(p[2]),Number(p[3]),cq.id); }
-  if (p[0] === "svc" && p[1] === "adddays") { await ack(); return services.showAddDays(env,telegram,chatId,messageId,userId,Number(p[2]),Number(p[3]),cq.id); }
-  if (p[0] === "svc" && p[1] === "addvolpay") { return services.confirmAddVolume(env,telegram,chatId,messageId,userId,Number(p[2]),Number(p[3]),cq.id); }
-  if (p[0] === "svc" && p[1] === "adddayspay") { return services.confirmAddDays(env,telegram,chatId,messageId,userId,Number(p[2]),Number(p[3]),cq.id); }
-  if (data === "support:end") { await ack(); await clearState(env,userId); await telegram.clearChatHistory(chatId,[],[messageId]); return sendMainMenu(env,telegram,chatId,null); }
-
-  if (
-    data === "support:main"
-  ) {
-    await ack();
-    await clearState(
-      env,
-      userId
-    );
-
-    return support.showSupportMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "support:ai"
-  ) {
-    await ack();
-
-    return support.startAISupport(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId
-    );
-  }
-
-  if (
-    data === "support:ai:reset"
-  ) {
-    await ack();
-
-    return support.startAISupport(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId
-    );
-  }
-
-  if (
-    data === "support:faq"
-  ) {
-    await ack();
-
-    return support.showFaqList(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    p[0] === "support" &&
-    p[1] === "faq" &&
-    p[2] !== undefined
-  ) {
-    await ack();
-
-    return support.showFaqAnswer(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[2],
-        10
-      )
-    );
-  }
-
-  if (
-    data === "support:ticket"
-  ) {
-    await ack();
-
-    return support.startTicketFlow(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId
-    );
-  }
-
-  // ---- admin ----
-
-  if (
-    data.startsWith("admin")
-  ) {
-    return onAdminCallback(
-      env,
-      telegram,
-      cq,
-      p,
-      ack
-    );
-  }
-}
-
-async function onAdminCallback(
-  env,
-  telegram,
-  cq,
-  p,
-  ack
-) {
-  const chatId =
-    cq.message.chat.id;
-
-  const messageId =
-    cq.message.message_id;
-
-  const adminId =
-    cq.from.id;
-
-  // Back buttons arrive as "__back__:<target>"; strip the prefix so the
-  // exact-match routes below (e.g. data === "admin:main") still resolve.
-  const data = (cq.data || "").startsWith("__back__:")
-    ? cq.data.slice("__back__:".length)
-    : cq.data;
-
-  const role =
-    await requireAdmin(
-      env,
-      adminId
-    );
-
-  if (!role) {
-    await telegram.answerCallbackQuery(
-      cq.id,
-      "دسترسی ندارید.",
-      true
-    );
-
+  if (ai?.decision === "reject" && settings.receipt_auto_reject_unrelated !== false) {
+    payment.auto_rejected = true;
+    await savePayment(kv, payment);
+    const { rejectPayment } = await import("./admin/payments.js");
+    await rejectPayment(env, telegram, chatId, 0, payment.id, true);
     return;
   }
 
-  const isOwner =
-    role === "owner";
-
-  if (p[0] === "admin" && p[1] === "group" && p[2]) { await ack(); return (await import("./handlers/admin/index.js")).showAdminGroup(env,telegram,chatId,messageId,p[2]); }
-
-  if (
-    data === "admin:main"
-  ) {
-    await ack();
-
-    return showAdminMenu(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      role
-    );
-  }
-
-  if (data === "admin:inventory") { await ack(); return adminInventory.showInventory(env,telegram,chatId,messageId); }
-  if (data === "admin:inv:add") { await ack(); return adminInventory.promptAdd(env,telegram,chatId,messageId,adminId); }
-  if (p[1] === "inv" && p[2] === "view") { await ack(); return adminInventory.showItem(env,telegram,chatId,messageId,Number(p[3])); }
-  if (p[1] === "inv" && p[2] === "del") { await ack(); return adminInventory.confirmDelete(env,telegram,chatId,messageId,Number(p[3])); }
-  if (p[1] === "inv" && p[2] === "delete") { await ack(); return adminInventory.remove(env,telegram,chatId,messageId,adminId,Number(p[3])); }
-  if (data === "admin:set:features") { await ack(); return adminSettings.showFeaturesMenu(env,telegram,chatId,messageId); }
-  if (p[0] === "admin" && p[1] === "feature" && p[2] === "toggle") { await ack(); return adminSettings.toggleFeature(env,telegram,chatId,messageId,adminId,p[3]); }
-  if (data === "admin:set:custom") { await ack(); return adminSettings.showCustomVolumeSettings(env,telegram,chatId,messageId); }
-  if (p[0] === "admin" && p[1] === "custom" && p[2] === "field") { await ack(); return adminSettings.promptCustomField(env,telegram,chatId,messageId,adminId,p[3]); }
-  if (data === "admin:custom:toggle") { await ack(); return adminSettings.toggleCustomVolume(env,telegram,chatId,messageId,adminId); }
-  if (data === "admin:custom:source") { await ack(); return adminSettings.toggleCustomSource(env,telegram,chatId,messageId,adminId); }
-  if (data === "admin:custom:panel") { await ack(); return adminSettings.showCustomPanelPicker(env,telegram,chatId,messageId); }
-  if (p[0] === "admin" && p[1] === "custom" && p[2] === "panelpick") { await ack(); return adminSettings.pickCustomPanel(env,telegram,chatId,messageId,adminId,Number(p[3])); }
-  if (p[0] === "admin" && p[1] === "custom" && p[2] === "profilepick") { await ack(); return adminSettings.pickCustomProfile(env,telegram,chatId,messageId,adminId,Number(p[3]),Number(p[4])); }
-
-  if (data === "admin:stats:csv") { await ack(); return adminStats.exportCSV(env,telegram,chatId,messageId); }
-
-  // users
-
-  if (
-    data === "admin:users"
-  ) {
-    await ack();
-
-    return adminUsers.showUsersMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:users:search"
-  ) {
-    await ack();
-
-    return adminUsers.promptSearch(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    p[1] === "user" &&
-    p[2] === "card"
-  ) {
-    await ack();
-
-    return adminUsers.sendUserCard(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "user" &&
-    p[2] === "ban"
-  ) {
-    await ack();
-
-    return adminUsers.toggleBan(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      ),
-      true
-    );
-  }
-
-  if (
-    p[1] === "user" &&
-    p[2] === "unban"
-  ) {
-    await ack();
-
-    return adminUsers.toggleBan(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      ),
-      false
-    );
-  }
-
-  if (
-    p[1] === "user" &&
-    p[2] === "resettest"
-  ) {
-    await ack();
-
-    return adminUsers.resetTest(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "user" &&
-    p[2] === "credit"
-  ) {
-    await ack();
-
-    return adminUsers.promptBalanceAmount(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      ),
-      "credit"
-    );
-  }
-
-  if (
-    p[1] === "user" &&
-    p[2] === "debit"
-  ) {
-    await ack();
-
-    return adminUsers.promptBalanceAmount(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      ),
-      "debit"
-    );
-  }
-
-  if (
-    p[1] === "user" &&
-    p[2] === "services"
-  ) {
-    await ack();
-
-    return adminUsers.showUserServices(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "user" &&
-    p[2] === "orders"
-  ) {
-    await ack();
-
-    return adminUsers.showUserOrders(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  // products
-
-  if (
-    data === "admin:products"
-  ) {
-    await ack();
-
-    return adminProducts.showProductsAdmin(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:prod:add"
-  ) {
-    await ack();
-
-    return adminProducts.startAddProduct(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    p[1] === "prod" &&
-    p[2] === "add" &&
-    p[3] === "cat"
-  ) {
-    await ack();
-
-    return adminProducts.addProductPickCategory(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[4],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "prod" &&
-    p[2] === "add" &&
-    p[3] === "panel"
-  ) {
-    await ack();
-
-    const state =
-      await getState(
-        env,
-        adminId
-      );
-
-    return adminProducts.addProductPickPanel(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[4],
-        10
-      ),
-      state
-        ? state.data
-        : {}
-    );
-  }
-
-  if (
-    p[1] === "prod" &&
-    p[2] === "add" &&
-    p[3] === "profile"
-  ) {
-    await ack();
-
-    const state =
-      await getState(
-        env,
-        adminId
-      );
-
-    return adminProducts.addProductPickProfile(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[4],
-        10
-      ),
-      state
-        ? state.data
-        : {}
-    );
-  }
-
-  if (
-    p[1] === "prod" &&
-    p[2] === "view"
-  ) {
-    await ack();
-
-    return adminProducts.showProductDetailAdmin(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "prod" &&
-    p[2] === "toggle"
-  ) {
-    await ack();
-
-    return adminProducts.toggleProduct(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "prod" &&
-    p[2] === "delconfirm"
-  ) {
-    await ack();
-
-    return adminProducts.confirmRemoveProduct(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "prod" &&
-    p[2] === "delete"
-  ) {
-    await ack();
-
-    return adminProducts.removeProduct(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "prod" &&
-    p[2] === "edit" &&
-    p[3] !== undefined
-  ) {
-    await ack();
-
-    return adminProducts.showEditMenu(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "prod" &&
-    p[2] === "editfield"
-  ) {
-    await ack();
-
-    return adminProducts.promptEditField(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      ),
-      p[4]
-    );
-  }
-
-  // categories
-
-  if (
-    data === "admin:categories"
-  ) {
-    await ack();
-
-    return adminCategories.showCategoriesAdmin(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:cat:add"
-  ) {
-    await ack();
-
-    return adminCategories.promptAddCategory(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    p[1] === "cat" &&
-    p[2] === "view"
-  ) {
-    await ack();
-
-    return adminCategories.showCategoryDetail(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "cat" &&
-    p[2] === "rename"
-  ) {
-    await ack();
-
-    return adminCategories.promptRenameCategory(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "cat" &&
-    p[2] === "toggle"
-  ) {
-    await ack();
-
-    return adminCategories.toggleCategory(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "cat" &&
-    p[2] === "delete"
-  ) {
-    await ack();
-
-    return adminCategories.deleteCategory(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  // panels
-
-  if (
-    data === "admin:panels"
-  ) {
-    await ack();
-
-    return adminPanels.showPanelsAdmin(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:panel:add"
-  ) {
-    await ack();
-
-    return adminPanels.startAddPanel(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    p[1] === "panel" &&
-    p[2] === "add" &&
-    p[3] === "type"
-  ) {
-    await ack();
-
-    return adminPanels.addPanelPickType(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      p[4]
-    );
-  }
-
-  if (
-    p[1] === "panel" &&
-    p[2] === "view"
-  ) {
-    await ack();
-
-    return adminPanels.showPanelDetail(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "panel" &&
-    p[2] === "toggle"
-  ) {
-    await ack();
-
-    return adminPanels.togglePanel(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "panel" &&
-    p[2] === "delete"
-  ) {
-    await ack();
-
-    return adminPanels.removePanel(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "panel" &&
-    p[2] === "test"
-  ) {
-    return adminPanels.runPanelTest(
-      env,
-      telegram,
-      chatId,
-      parseInt(
-        p[3],
-        10
-      ),
-      cq.id
-    );
-  }
-
-  // profiles
-
-  if (
-    data === "admin:profiles"
-  ) {
-    await ack();
-
-    return adminProfiles.showProfilesMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    p[1] === "profiles" &&
-    p[2] === "panel"
-  ) {
-    await ack();
-
-    return adminProfiles.showPanelProfiles(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "profile" &&
-    p[2] === "add" &&
-    p[3] === "proto"
-  ) {
-    await ack();
-
-    return adminProfiles.addProfilePickProtocol(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[4],
-        10
-      ),
-      p[5]
-    );
-  }
-
-  if (
-    p[1] === "profile" &&
-    p[2] === "add"
-  ) {
-    await ack();
-
-    return adminProfiles.startAddProfile(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "profile" &&
-    p[2] === "view"
-  ) {
-    await ack();
-
-    return adminProfiles.showProfileDetail(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      ),
-      parseInt(
-        p[4],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "profile" &&
-    p[2] === "toggle"
-  ) {
-    await ack();
-
-    return adminProfiles.toggleProfile(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      ),
-      parseInt(
-        p[4],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "profile" &&
-    p[2] === "delete"
-  ) {
-    await ack();
-
-    return adminProfiles.deleteProfile(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      ),
-      parseInt(
-        p[4],
-        10
-      )
-    );
-  }
-
-  // discounts
-
-  if (
-    data === "admin:discounts"
-  ) {
-    await ack();
-
-    return adminDiscounts.showDiscountsAdmin(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:disc:add"
-  ) {
-    await ack();
-
-    return adminDiscounts.startAddDiscount(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    p[1] === "disc" &&
-    p[2] === "add" &&
-    p[3] === "type"
-  ) {
-    await ack();
-
-    const state =
-      await getState(
-        env,
-        adminId
-      );
-
-    return adminDiscounts.pickDiscountTypeDone(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      p[4],
-      state
-        ? state.data.code
-        : null
-    );
-  }
-
-  if (
-    p[1] === "disc" &&
-    p[2] === "view"
-  ) {
-    await ack();
-
-    return adminDiscounts.showDiscountDetail(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      p[3]
-    );
-  }
-
-  if (
-    p[1] === "disc" &&
-    p[2] === "toggle"
-  ) {
-    await ack();
-
-    return adminDiscounts.toggleDiscount(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      p[3]
-    );
-  }
-
-  if (
-    p[1] === "disc" &&
-    p[2] === "delete"
-  ) {
-    await ack();
-
-    return adminDiscounts.removeDiscount(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      p[3]
-    );
-  }
-
-  if (
-    p[1] === "disc" &&
-    p[2] === "stats"
-  ) {
-    await ack();
-
-    return adminDiscounts.showDiscountDetail(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      p[3]
-    );
-  }
-
-  // payments
-
-  if (
-    data === "admin:payments"
-  ) {
-    await ack();
-
-    return adminPayments.showPaymentsAdmin(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:manualsale"
-  ) {
-    await ack();
-
-    return adminManualSale.showManualSaleMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:manualsale:start"
-  ) {
-    await ack();
-
-    return adminManualSale.promptUser(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    p[1] === "manualsale" &&
-    p[2] === "product"
-  ) {
-    await ack();
-
-    return adminManualSale.handleProduct(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "pay" &&
-    p[2] === "view"
-  ) {
-    await ack();
-
-    return adminPayments.showPaymentDetail(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "pay" &&
-    p[2] === "approve"
-  ) {
-    await ack();
-
-    return adminPayments.approvePayment(
-      env,
-      telegram,
-      chatId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "pay" &&
-    p[2] === "reject"
-  ) {
-    await ack();
-
-    return adminPayments.rejectPayment(
-      env,
-      telegram,
-      chatId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  // wallet (admin entry point)
-
-  if (
-    data === "admin:wallet"
-  ) {
-    await ack();
-
-    return showWalletAdminMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  // broadcast
-
-  if (
-    data === "admin:broadcast"
-  ) {
-    await ack();
-
-    return adminBroadcast.showBroadcastMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    p[1] === "bc" &&
-    p[2] === "target"
-  ) {
-    await ack();
-
-    return adminBroadcast.pickBroadcastTarget(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      p[3]
-    );
-  }
-
-  // admins (owner only)
-
-  if (
-    data === "admin:admins"
-  ) {
-    if (!isOwner) {
-      await telegram.answerCallbackQuery(
-        cq.id,
-        "فقط Owner",
-        true
-      );
-
-      return;
-    }
-
-    await ack();
-
-    return adminAdmins.showAdminsList(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:admin:add"
-  ) {
-    await ack();
-
-    return adminAdmins.promptAddAdmin(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    p[1] === "admin" &&
-    p[2] === "add" &&
-    p[3] === "role"
-  ) {
-    await ack();
-
-    const state =
-      await getState(
-        env,
-        adminId
-      );
-
-    return adminAdmins.finishAddAdmin(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      p[4],
-      state
-        ? state.target_id
-        : null
-    );
-  }
-
-  if (
-    p[1] === "admin" &&
-    p[2] === "view"
-  ) {
-    await ack();
-
-    return adminAdmins.showAdminDetail(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "admin" &&
-    p[2] === "remove"
-  ) {
-    return adminAdmins.removeAdmin(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      ),
-      cq.id
-    );
-  }
-
-  // channels
-
-  if (
-    data === "admin:channels"
-  ) {
-    await ack();
-
-    return adminChannels.showChannelsAdmin(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:chan:add"
-  ) {
-    await ack();
-
-    return adminChannels.startAddChannel(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    p[1] === "chan" &&
-    p[2] === "view"
-  ) {
-    await ack();
-
-    return adminChannels.showChannelDetail(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "chan" &&
-    p[2] === "toggle"
-  ) {
-    await ack();
-
-    return adminChannels.toggleChannel(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "chan" &&
-    p[2] === "delete"
-  ) {
-    await ack();
-
-    return adminChannels.removeChannel(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  // settings
-
-  if (
-    data === "admin:settings"
-  ) {
-    await ack();
-
-    return adminSettings.showSettingsMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    p[1] === "set" &&
-    p[2] === "field"
-  ) {
-    await ack();
-
-    return adminSettings.promptSettingValue(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      p[3]
-    );
-  }
-
-  if (
-    data === "admin:set:gateway"
-  ) {
-    await ack();
-
-    return adminSettings.toggleGateway(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    data === "admin:set:power"
-  ) {
-    await ack();
-
-    return adminSettings.toggleBotPower(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    data === "admin:set:texts"
-  ) {
-    await ack();
-
-    return adminSettings.showTextsMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:set:emojis"
-  ) {
-    await ack();
-
-    return adminSettings.showEmojiMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    p[1] === "emoji" &&
-    p[2] === "item"
-  ) {
-    await ack();
-
-    return adminSettings.promptEmojiValue(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    data === "admin:emoji:reset"
-  ) {
-    await ack();
-
-    return adminSettings.resetEmojis(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    data === "admin:set:ai"
-  ) {
-    await ack();
-
-    return adminSettings.showAIMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:ai:toggle"
-  ) {
-    await ack();
-
-    return adminSettings.toggleSupportAI(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    data === "admin:receiptai:toggle"
-  ) {
-    await ack();
-
-    return adminSettings.toggleReceiptAI(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    data === "admin:ai:provider"
-  ) {
-    await ack();
-
-    return adminSettings.showAIProviderMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    p[1] === "ai" &&
-    p[2] === "provider" &&
-    p[3]
-  ) {
-    await ack();
-
-    return adminSettings.setAIProvider(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      p[3]
-    );
-  }
-
-  if (
-    p[1] === "ai" &&
-    p[2] === "key" &&
-    p[3]
-  ) {
-    await ack();
-
-    return adminSettings.promptAIKey(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      p[3]
-    );
-  }
-
-  if (
-    data === "admin:set:backup"
-  ) {
-    await ack();
-
-    return adminSettings.createBackup(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    p[1] === "text" &&
-    p[2] === "cat"
-  ) {
-    await ack();
-
-    return adminSettings.showTextCategory(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "text" &&
-    p[2] === "field"
-  ) {
-    await ack();
-
-    return adminSettings.promptTextValue(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      ),
-      parseInt(
-        p[4],
-        10
-      )
-    );
-  }
-
-  // button styles
-
-  if (
-    data === "admin:set:styles"
-  ) {
-    await ack();
-
-    return adminSettings.showButtonStylesMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    p[1] === "style" &&
-    p[2] === "cat"
-  ) {
-    await ack();
-
-    return adminSettings.showButtonStyleCategory(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "style" &&
-    p[2] === "item"
-  ) {
-    await ack();
-
-    return adminSettings.showStylePicker(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      ),
-      parseInt(
-        p[4],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "style" &&
-    p[2] === "set"
-  ) {
-    await ack();
-
-    return adminSettings.setButtonStyle(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      ),
-      parseInt(
-        p[4],
-        10
-      ),
-      p[5]
-    );
-  }
-
-  // FAQ
-
-  if (
-    data === "admin:faq"
-  ) {
-    await ack();
-
-    return adminFaq.showFaqAdmin(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:faq:add"
-  ) {
-    await ack();
-
-    return adminFaq.promptAddFaq(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    p[1] === "faq" &&
-    p[2] === "view"
-  ) {
-    await ack();
-
-    return adminFaq.showFaqDetailAdmin(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "faq" &&
-    p[2] === "editfield"
-  ) {
-    await ack();
-
-    return adminFaq.promptEditFaqField(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      ),
-      p[4]
-    );
-  }
-
-  if (
-    p[1] === "faq" &&
-    p[2] === "delconfirm"
-  ) {
-    await ack();
-
-    return adminFaq.confirmDeleteFaq(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "faq" &&
-    p[2] === "delete"
-  ) {
-    await ack();
-
-    return adminFaq.deleteFaq(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  // log group
-
-  if (
-    data === "admin:set:log"
-  ) {
-    await ack();
-
-    return adminSettings.showLogGroupMenu(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:log:setup"
-  ) {
-    await ack();
-
-    return adminSettings.promptLogGroupSetup(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    data === "admin:log:rebuild"
-  ) {
-    await ack();
-
-    return adminSettings.rebuildLogTopics(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  if (
-    data === "admin:log:clear"
-  ) {
-    await ack();
-
-    return adminSettings.clearLogSettings(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId
-    );
-  }
-
-  // stats / audit
-
-  if (
-    data === "admin:stats"
-  ) {
-    await ack();
-
-    return adminStats.showStats(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    data === "admin:audit"
-  ) {
-    await ack();
-
-    return adminStats.showAudit(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  // tickets
-
-  if (
-    data === "admin:tickets"
-  ) {
-    await ack();
-
-    return adminTickets.showOpenTickets(
-      env,
-      telegram,
-      chatId,
-      messageId
-    );
-  }
-
-  if (
-    p[1] === "ticket" &&
-    p[2] === "view"
-  ) {
-    await ack();
-
-    return adminTickets.showTicketDetail(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "ticket" &&
-    p[2] === "reply"
-  ) {
-    await ack();
-
-    return adminTickets.promptTicketReply(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  if (
-    p[1] === "ticket" &&
-    p[2] === "close"
-  ) {
-    await ack();
-
-    return adminTickets.closeTicket(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(
-        p[3],
-        10
-      )
-    );
-  }
-
-  await ack();
-      }
-
-export { WalletLock } from "./lib/locks.js";
+  // Only genuine uncertainty reaches admins. API failures are explicitly
+  // labelled as such so they cannot be mistaken for a rejected receipt.
+  await notifyAdminsForReview(
+    env,
+    telegram,
+    payment,
+    photo.file_id,
+    userId,
+    state,
+    ai?.reason || (settings.receipt_ai_enabled ? "AI بررسی قطعی ارائه نکرد" : "بررسی خودکار رسید خاموش است")
+  );
+}
+
+function normalizeDigits(value) {
+  return String(value ?? "")
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)));
+}
+
+async function notifyAdminsForReview(env, telegram, payment, fileId, userId, state, reason) {
+  const admins = await getAdmins(env.BOT_KV);
+  const caption =
+    `⚠️ رسید نیازمند بررسی دستی\n\n` +
+    `👤 کاربر: ${userId}\n💰 مبلغ: ${state.amount.toLocaleString("en-US")} تومان\n` +
+    `💳 ۴ رقم کارت: ${state.card_last4 || "-"}\n🆔 پرداخت: #${payment.id}\n` +
+    `🤖 دلیل: ${String(reason).slice(0, 500)}`;
+  const kb = keyboard([
+    { text: "✅ تأیید", data: `admin:pay:approve:${payment.id}` },
+    { text: "❌ رد", data: `admin:pay:reject:${payment.id}` },
+  ], { perRow: 2 });
+  for (const admin of admins) {
+    await telegram.sendPhoto(admin.id, fileId, { caption, reply_markup: kb });
+  }
+}
+
+export async function showTransactions(env, telegram, chatId, messageId, userId) {
+  const user = await getUser(env.BOT_KV, userId);
+  const texts = await getTexts(env.BOT_KV);
+  const list = (user.transactions || []).slice(0, 5);
+  if (list.length === 0) {
+    await telegram.editOrSend(chatId, messageId, texts.wallet_no_transactions, {
+      reply_markup: keyboard([], { back: "wallet:main" }),
+    });
+    return;
+  }
+  const buttons = list.map((t, i) => ({
+    text: `🔹 تراکنش ${i + 1} • ${new Date(t.at || Date.now()).toLocaleDateString("fa-IR")}`,
+    data: `wallet:tx:${i}`,
+  }));
+  await telegram.editOrSend(chatId, messageId,
+    `📜 <b>تراکنش‌های اخیر کیف پول</b>\n\nبرای مشاهده جزئیات، یکی از ۵ تراکنش اخیر را انتخاب کنید.`,
+    { reply_markup: keyboard(buttons, { perRow: 1, back: "wallet:main" }) });
+}
+
+export async function showTransactionDetail(env, telegram, chatId, messageId, userId, index) {
+  const user = await getUser(env.BOT_KV, userId);
+  const tx = (user?.transactions || [])[Number(index)];
+  if (!tx) {
+    await telegram.editOrSend(chatId, messageId, "این تراکنش دیگر در دسترس نیست.", {
+      reply_markup: keyboard([], { back: "wallet:tx" }),
+    });
+    return;
+  }
+  const amount = Number(tx.amount || 0);
+  const text =
+    `🧾 <b>جزئیات تراکنش ${Number(index) + 1}</b>\n\n` +
+    `🏷 نوع: ${String(tx.type || "نامشخص")}\n` +
+    `📝 شرح: ${String(tx.description || "—")}\n` +
+    `💵 مبلغ: ${amount >= 0 ? "+" : ""}${amount.toLocaleString("en-US")} تومان\n` +
+    `💰 موجودی قبل: ${Number(tx.balance_before || 0).toLocaleString("en-US")} تومان\n` +
+    `💳 موجودی بعد: ${Number(tx.balance_after ?? user.balance ?? 0).toLocaleString("en-US")} تومان\n` +
+    `🕒 تاریخ: ${new Date(tx.at || Date.now()).toLocaleString("fa-IR")}`;
+  await telegram.editOrSend(chatId, messageId, text, {
+    reply_markup: keyboard([{ text: "📜 بازگشت به تراکنش‌ها", data: "wallet:tx" }], { back: "wallet:main" }),
+  });
+}
+
+
+export async function startGatewayAmount(env,telegram,chatId,messageId,userId,amount) {
+  const settings=await getSettings(env.BOT_KV); const texts=await getTexts(env.BOT_KV); const n=Number(amount);
+  if(!Number.isFinite(n)||n<Number(settings.min_charge||0)) return telegram.editOrSend(chatId,messageId,render(texts.wallet_custom_amount_invalid,{min:toman(settings.min_charge)}),{reply_markup:keyboard([], {back:"wallet:charge:gateway"})});
+  const user=await getUser(env.BOT_KV,userId);
+  await telegram.editOrSend(chatId,messageId,`🌐 <b>تأیید پرداخت آنلاین</b>\n\n💰 مبلغ: ${toman(n)}\n💼 موجودی فعلی: ${toman(user.balance)}\n\nبا تأیید به صفحه بانک منتقل می‌شوید.`,{reply_markup:keyboard([{text:"💳 رفتن به درگاه",data:`wallet:gateway:go:${n}`}],{perRow:1,back:"wallet:charge:gateway"})});
+}
+export async function startGatewayPayment(env,telegram,chatId,messageId,userId,amount){
+ const n=Number(amount); const payment=await createPayment(env.BOT_KV,{user_id:userId,method:"zarinpal",amount:n,ai_status:"not_applicable"});
+ const callbackUrl=`${env.PUBLIC_BASE_URL||""}/payments/zarinpal/callback`;
+ if(!env.PUBLIC_BASE_URL) { await telegram.editOrSend(chatId,messageId,"❌ آدرس عمومی بازگشت درگاه تنظیم نشده است. متغیر <code>PUBLIC_BASE_URL</code> را در Wrangler تنظیم کنید.",{reply_markup:keyboard([], {back:"wallet:charge:gateway"})}); return; }
+ try{const authority=await requestPayment(env,{amount:n,callbackUrl,description:`شارژ کیف پول #${payment.id}`,metadata:{payment_id:String(payment.id),user_id:String(userId)}});payment.authority=authority;await savePayment(env.BOT_KV,payment);await telegram.editOrSend(chatId,messageId,"🌐 درگاه پرداخت آماده است.\n\nپس از پرداخت، کیف پول شما به‌صورت خودکار شارژ می‌شود.",{reply_markup:keyboard([{text:"💳 پرداخت امن",url:startUrl(env,authority)}],{perRow:1,back:"wallet:charge"})});}
+ catch(e){payment.status="rejected";payment.gateway_error=String(e);await savePayment(env.BOT_KV,payment);await resolvePayment(env.BOT_KV,payment.id);await telegram.editOrSend(chatId,messageId,"❌ ایجاد پرداخت آنلاین ناموفق بود. لطفاً دوباره تلاش کنید.",{reply_markup:keyboard([], {back:"wallet:charge:gateway"})});}
+}
+export async function handleZarinpalCallback(env,telegram,url){
+ const authority=url.searchParams.get("Authority"),status=url.searchParams.get("Status"); if(!authority)return new Response("missing authority",{status:400});
+ const kv=env.BOT_KV; const ids=await (await import("../lib/kv.js")).getIndex(kv,"index:payments:pending"); const payments=await Promise.all(ids.map(id=>getPayment(kv,id))); const payment=payments.find(p=>p?.authority===authority);
+ if(!payment)return new Response("payment not found",{status:404});
+ if(status!=="OK") {payment.status="rejected";await savePayment(kv,payment);await resolvePayment(kv,payment.id);return new Response("پرداخت لغو شد. می‌توانید به ربات برگردید.",{status:200,headers:{"content-type":"text/plain;charset=utf-8"}});}
+ const verified=await verifyPayment(env,payment.amount,authority);if(!verified)return new Response("payment verification failed",{status:400});
+ await withUserLock(env,payment.user_id,async()=>{const fresh=await getPayment(kv,payment.id);if(!fresh||fresh.status!=="pending")return;fresh.status="approved";fresh.ref_id=verified.ref_id;await savePayment(kv,fresh);await resolvePayment(kv,fresh.id);await addTransaction(kv,fresh.user_id,{type:"charge",amount:fresh.amount,description:"شارژ کیف پول (درگاه زرین‌پال)"});const st=await getStats(kv);st.total_charge+=fresh.amount;await saveStats(kv,st);const chargedUser=await getUser(kv,fresh.user_id);if(chargedUser){const {reportWalletCharge}=await import("../lib/report.js");const {logWalletCharge}=await import("../lib/log.js");await reportWalletCharge(env,telegram,chargedUser,fresh.amount);await logWalletCharge(env,telegram,chargedUser,fresh.amount);}await telegram.sendMessage(fresh.user_id,`✅ پرداخت آنلاین با موفقیت تأیید شد.\n💰 مبلغ ${toman(fresh.amount)} به کیف پول شما اضافه شد.`);});
+ return new Response("پرداخت با موفقیت انجام شد. به ربات برگردید.",{status:200,headers:{"content-type":"text/plain;charset=utf-8"}});
+}
+
+export async function handleGatewayCustomAmountInput(env,telegram,message){
+ const n=Number((message.text||"").replace(/[^\d]/g,"")); await clearState(env,message.from.id); return startGatewayAmount(env,telegram,message.chat.id,null,message.from.id,n);
+}
