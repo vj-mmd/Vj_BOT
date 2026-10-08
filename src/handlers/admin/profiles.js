@@ -49,37 +49,121 @@ export async function addProfilePickProtocol(env, telegram, chatId, messageId, a
   );
 }
 
+const toLatinDigits = (s) =>
+  String(s || "")
+    .replace(/[۰-۹]/g, (d) => "۰۱۲۳۴۵۶۷۸۹".indexOf(d))
+    .replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
+
+// Marzban / PasarGuard need the lowercase protocol key (vless, vmess, ...);
+// 3x-ui only uses the label for display.
+function normalizeProtocol(panelType, label) {
+  if (panelType === "threexui") return label;
+  const l = String(label || "").toLowerCase();
+  if (l.includes("vless")) return "vless";
+  if (l.includes("vmess")) return "vmess";
+  if (l.includes("trojan")) return "trojan";
+  if (l.includes("shadowsocks")) return "shadowsocks";
+  return l;
+}
+
+function inboundPrompt(panelType) {
+  return panelType === "threexui"
+    ? "🔢 <b>شماره (ID) اینباند</b> را ارسال کنید.\n\nدر پنل 3x-ui: بخش Inbounds ← ستون ID (مثلاً 1)"
+    : "🏷 <b>تگ (tag) اینباند</b> را دقیقاً مطابق پنل ارسال کنید.\n\nدر پنل: Core Settings ← بخش inbounds ← فیلد tag\n(مثال: VLESS TCP REALITY)";
+}
+
 export async function handleProfileTextInput(env, telegram, message, state) {
   const chatId = message.chat.id;
   const adminId = message.from.id;
   const name = (message.text || "").trim();
-  const kv = env.BOT_KV;
-  await clearState(env, adminId);
-
-  const profiles = await getProfiles(kv, state.data.panel_id);
-  const id = (profiles.reduce((m, p) => Math.max(m, p.id), 0) || 0) + 1;
-
-  // `settings` / `inbound_tag` / `inbound_id` hold panel-specific routing info
-  // (which inbound on Marzban, which inbound id on 3x-ui). Defaults are left
-  // blank here since they depend on your panel's existing inbound config -
-  // edit them directly in KV or extend this wizard if you need them sooner.
-  profiles.push({
-    id,
-    name,
-    protocol: state.data.protocol,
-    active: true,
-    inbound_tag: "",
-    inbound_id: null,
-    settings: {},
+  if (!name) {
+    await telegram.sendMessage(chatId, "❌ نام نامعتبر است. دوباره ارسال کنید:");
+    return;
+  }
+  const panel = await getPanel(env.BOT_KV, state.data.panel_id);
+  await setState(env, adminId, { step: "admin_profile_inbound", data: { ...state.data, name } });
+  await telegram.sendMessage(chatId, inboundPrompt(panel?.type), {
+    reply_markup: keyboard([], { back: `admin:profiles:panel:${state.data.panel_id}` }),
   });
-  await saveProfiles(kv, state.data.panel_id, profiles);
-  await logAction(kv, adminId, "add_profile", { panel_id: state.data.panel_id, id });
+}
 
-  await telegram.sendMessage(
-    chatId,
-    `✅ پروفایل «${name}» اضافه شد.\n\n⚠️ توجه: فیلد inbound_tag/inbound_id این پروفایل هنوز خالی است و باید طبق اینباند واقعی پنل شما تنظیم شود.`,
-    { reply_markup: keyboard([{ text: "📋 بازگشت", data: `admin:profiles:panel:${state.data.panel_id}` }], { perRow: 1 }) }
-  );
+export async function startSetInbound(env, telegram, chatId, messageId, adminId, panelId, profileId) {
+  const panel = await getPanel(env.BOT_KV, panelId);
+  const profiles = await getProfiles(env.BOT_KV, panelId);
+  const p = profiles.find((x) => x.id === profileId);
+  if (!panel || !p) return;
+  await setState(env, adminId, { step: "admin_profile_inbound", data: { panel_id: panelId, profile_id: profileId } });
+  await telegram.editOrSend(chatId, messageId, inboundPrompt(panel.type), {
+    reply_markup: keyboard([], { back: `admin:profile:view:${panelId}:${profileId}` }),
+  });
+}
+
+export async function handleProfileInboundInput(env, telegram, message, state) {
+  const chatId = message.chat.id;
+  const adminId = message.from.id;
+  const kv = env.BOT_KV;
+  const raw = (message.text || "").trim();
+  const panelId = state.data.panel_id;
+  const panel = await getPanel(kv, panelId);
+  if (!panel) {
+    await clearState(env, adminId);
+    return telegram.sendMessage(chatId, "❌ پنل پیدا نشد.");
+  }
+
+  let inbound_id = null;
+  let inbound_tag = "";
+  if (panel.type === "threexui") {
+    const n = parseInt(toLatinDigits(raw).replace(/[^\d]/g, ""), 10);
+    if (Number.isNaN(n)) {
+      await telegram.sendMessage(chatId, "❌ فقط عدد ID اینباند را ارسال کنید (مثلاً 1):");
+      return;
+    }
+    inbound_id = n;
+  } else {
+    if (!raw) {
+      await telegram.sendMessage(chatId, "❌ تگ اینباند نمی‌تواند خالی باشد. دوباره ارسال کنید:");
+      return;
+    }
+    inbound_tag = raw;
+  }
+
+  await clearState(env, adminId);
+  const profiles = await getProfiles(kv, panelId);
+  let profile;
+
+  if (state.data.profile_id) {
+    profile = profiles.find((x) => x.id === state.data.profile_id);
+    if (!profile) return telegram.sendMessage(chatId, "❌ پروفایل پیدا نشد.");
+    const wasReality = /reality/i.test(`${profile.protocol} ${profile.name}`);
+    profile.protocol = normalizeProtocol(panel.type, profile.protocol);
+    profile.inbound_id = inbound_id;
+    profile.inbound_tag = inbound_tag;
+    if (panel.type !== "threexui" && profile.protocol === "vless" && !(profile.settings && profile.settings.flow) && wasReality) {
+      profile.settings = { ...(profile.settings || {}), flow: "xtls-rprx-vision" };
+    }
+  } else {
+    const id = (profiles.reduce((m, p) => Math.max(m, p.id), 0) || 0) + 1;
+    const isReality = /reality/i.test(state.data.protocol || "");
+    const protocol = normalizeProtocol(panel.type, state.data.protocol);
+    profile = {
+      id,
+      name: state.data.name,
+      protocol,
+      active: true,
+      inbound_tag,
+      inbound_id,
+      settings: panel.type !== "threexui" && protocol === "vless" && isReality ? { flow: "xtls-rprx-vision" } : {},
+    };
+    profiles.push(profile);
+  }
+
+  await saveProfiles(kv, panelId, profiles);
+  await logAction(kv, adminId, state.data.profile_id ? "set_profile_inbound" : "add_profile", { panel_id: panelId, id: profile.id });
+
+  const shown = panel.type === "threexui" ? `ID اینباند: ${inbound_id}` : `تگ اینباند: ${inbound_tag}`;
+  await telegram.sendMessage(chatId, `✅ پروفایل «${profile.name}» ذخیره شد.\n${shown}`, {
+    reply_markup: keyboard([{ text: "📋 بازگشت", data: `admin:profiles:panel:${panelId}` }], { perRow: 1 }),
+  });
 }
 
 export async function toggleProfile(env, telegram, chatId, messageId, adminId, panelId, profileId) {
@@ -105,11 +189,16 @@ export async function showProfileDetail(env, telegram, chatId, messageId, panelI
   const profiles = await getProfiles(env.BOT_KV, panelId);
   const p = profiles.find((x) => x.id === profileId);
   if (!p) return;
+  const panel = await getPanel(env.BOT_KV, panelId);
+  const inboundLine = panel?.type === "threexui"
+    ? `\nID اینباند: ${p.inbound_id ?? "❗️تنظیم نشده"}`
+    : `\nتگ اینباند: ${p.inbound_tag || "❗️تنظیم نشده"}`;
   const buttons = [
+    { text: "🔧 تنظیم اینباند", data: `admin:profile:inbound:${panelId}:${p.id}` },
     p.active ? { text: "🔴 غیرفعال", data: `admin:profile:toggle:${panelId}:${p.id}` } : { text: "🟢 فعال", data: `admin:profile:toggle:${panelId}:${p.id}` },
     { text: "🗑 حذف", data: `admin:profile:delete:${panelId}:${p.id}` },
   ];
-  await telegram.editOrSend(chatId, messageId, `👤 ${p.name}\nپروتکل: ${p.protocol}`, {
+  await telegram.editOrSend(chatId, messageId, `👤 ${p.name}\nپروتکل: ${p.protocol}${inboundLine}`, {
     reply_markup: keyboard(buttons, { back: `admin:profiles:panel:${panelId}` }),
   });
 }
