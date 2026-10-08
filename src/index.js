@@ -694,14 +694,6 @@ async function onMessage(env, telegram, message, ctx) {
         state
       );
 
-    case "admin_profile_inbound":
-      return adminProfiles.handleProfileInboundInput(
-        env,
-        telegram,
-        message,
-        state
-      );
-
     case "admin_add_disc_code":
     case "admin_add_disc_value":
     case "admin_add_disc_maxuses":
@@ -1073,9 +1065,7 @@ async function onCallback(
       parseInt(
         p[2],
         10
-      ),
-      undefined,
-      userId
+      )
     );
   }
 
@@ -1095,22 +1085,6 @@ async function onCallback(
         p[2],
         10
       )
-    );
-  }
-
-  if (
-    p[0] === "buy" &&
-    p[1] === "nodisc"
-  ) {
-    await ack();
-
-    return purchase.removeAppliedDiscount(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      userId,
-      parseInt(p[2], 10)
     );
   }
 
@@ -2319,23 +2293,6 @@ async function onAdminCallback(
         p[4],
         10
       )
-    );
-  }
-
-  if (
-    p[1] === "profile" &&
-    p[2] === "inbound"
-  ) {
-    await ack();
-
-    return adminProfiles.startSetInbound(
-      env,
-      telegram,
-      chatId,
-      messageId,
-      adminId,
-      parseInt(p[3], 10),
-      parseInt(p[4], 10)
     );
   }
 
