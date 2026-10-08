@@ -145,7 +145,15 @@ export async function showCustomVolume(env, telegram, chatId, messageId, volume,
   const v = clamp(Number(volume || cfg.base_volume_gb || 1), Number(cfg.min_volume_gb || 1), Number(cfg.max_volume_gb || 1000));
   const d = clamp(Number(days || cfg.base_duration_days || 1), Number(cfg.min_duration_days || 1), Number(cfg.max_duration_days || 365));
   const price = customPrice(cfg, v, d);
-  const text = `${texts.custom_volume_title}\n\n${texts.custom_volume_description}\n\n${render(texts.custom_volume_summary, { volume:v, days:d, price:toman(price) })}\n\n💡 هر + یعنی ۱ واحد بیشتر.`;
+  const user = await getUser(env.BOT_KV, chatId); // private chat: chat id === user id
+  const balance = Number(user?.balance || 0);
+  const text =
+    `🛒 <b>خرید کانفیگ</b>\n\n` +
+    `📦 حجم انتخابی: ${v} گیگ\n` +
+    `⏳ مدت زمان: ${d} روز\n\n` +
+    `💵 قیمت هر گیگ: ${toman(cfg.extra_gb_price)}\n` +
+    `💰 مبلغ نهایی: ${toman(price)}\n` +
+    `💼 موجودی شما: ${toman(balance)}`;
   const buttons = [
     { text: "➖ حجم", data: `buy:custom:${clamp(v-1,cfg.min_volume_gb,cfg.max_volume_gb)}:${d}` },
     { text: `📦 ${v} GB`, data: `buy:custom:${v}:${d}` },
@@ -153,7 +161,9 @@ export async function showCustomVolume(env, telegram, chatId, messageId, volume,
     { text: "➖ روز", data: `buy:custom:${v}:${clamp(d-1,cfg.min_duration_days,cfg.max_duration_days)}` },
     { text: `⏳ ${d} روز`, data: `buy:custom:${v}:${d}` },
     { text: "➕ روز", data: `buy:custom:${v}:${clamp(d+1,cfg.min_duration_days,cfg.max_duration_days)}` },
-    { text: `💳 پرداخت ${toman(price)}`, data: `buy:custompay:${v}:${d}` },
+    balance >= price
+      ? { text: "✅ تأیید و ساخت سرویس", data: `buy:customconfirm:${v}:${d}` }
+      : { text: "💳 شارژ کیف پول", data: "wallet:charge" },
   ];
   await telegram.editOrSend(chatId, messageId, text, { reply_markup: keyboard(buttons, { perRow: 3, back: backTo }) });
 }
@@ -280,4 +290,4 @@ export async function handlePurchaseConfirm(env, telegram, chatId, messageId, us
 
 async function notifyPurchaseFailureAdmins(env,telegram,userId,product,amount,reason){
   try{const admins=await getAdmins(env.BOT_KV);const msg=`⚠️ <b>خرید ناموفق و بازپرداخت شد</b>\n👤 کاربر: <code>${userId}</code>\n📦 ${product.name}\n💸 بازگشت: ${toman(amount)}\n❗ ${String(reason).replace(/[<>&]/g,"").slice(0,300)}`;await Promise.all(admins.map(a=>telegram.sendMessage(a.id,msg)));}catch{}
-}
+        }
