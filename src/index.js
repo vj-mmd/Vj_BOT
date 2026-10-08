@@ -694,6 +694,14 @@ async function onMessage(env, telegram, message, ctx) {
         state
       );
 
+    case "admin_profile_inbound":
+      return adminProfiles.handleProfileInboundInput(
+        env,
+        telegram,
+        message,
+        state
+      );
+
     case "admin_add_disc_code":
     case "admin_add_disc_value":
     case "admin_add_disc_maxuses":
@@ -1065,7 +1073,9 @@ async function onCallback(
       parseInt(
         p[2],
         10
-      )
+      ),
+      undefined,
+      userId
     );
   }
 
@@ -1085,6 +1095,22 @@ async function onCallback(
         p[2],
         10
       )
+    );
+  }
+
+  if (
+    p[0] === "buy" &&
+    p[1] === "nodisc"
+  ) {
+    await ack();
+
+    return purchase.removeAppliedDiscount(
+      env,
+      telegram,
+      chatId,
+      messageId,
+      userId,
+      parseInt(p[2], 10)
     );
   }
 
@@ -1187,7 +1213,6 @@ async function onCallback(
     );
   }
 
-  if (p[0] === "wallet" && p[1] === "kp") { return wallet.handleKeypad(env, telegram, chatId, messageId, userId, cq.id, p[2], p[3], p[4]); }
   if (p[0] === "wallet" && p[1] === "gateway" && p[2] === "amt") { await ack(); return wallet.startGatewayAmount(env,telegram,chatId,messageId,userId,Number(p[3])); }
   if (data === "wallet:gateway:custom") { await ack(); await setState(env,userId,{step:"await_gateway_amount"}); return telegram.editOrSend(chatId,messageId,(await getTexts(env.BOT_KV)).wallet_custom_amount_prompt,{reply_markup:keyboard([], {back:"wallet:charge:gateway"})}); }
   if (p[0] === "wallet" && p[1] === "gateway" && p[2] === "go") { await ack(); return wallet.startGatewayPayment(env,telegram,chatId,messageId,userId,Number(p[3])); }
@@ -2294,6 +2319,23 @@ async function onAdminCallback(
         p[4],
         10
       )
+    );
+  }
+
+  if (
+    p[1] === "profile" &&
+    p[2] === "inbound"
+  ) {
+    await ack();
+
+    return adminProfiles.startSetInbound(
+      env,
+      telegram,
+      chatId,
+      messageId,
+      adminId,
+      parseInt(p[3], 10),
+      parseInt(p[4], 10)
     );
   }
 
