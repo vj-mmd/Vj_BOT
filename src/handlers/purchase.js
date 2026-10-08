@@ -82,18 +82,43 @@ function priceAfterDiscount(product, discount) {
   return discount.type === "percent" ? Math.max(0, Math.round(product.price * (1 - discount.value / 100))) : Math.max(0, product.price - discount.value);
 }
 
-export async function showProductDetail(env, telegram, chatId, messageId, productId, discountCode) {
+// The applied discount code is stored server-side (per user + product) instead of
+// being packed into callback_data: Telegram limits callback_data to 64 bytes, and
+// codes containing ':' / Persian letters / long text broke the buttons.
+const appliedKey = (userId, productId) => `applied_disc:${userId}:${productId}`;
+async function getAppliedDiscount(kv, userId, productId) { return kv.get(appliedKey(userId, productId)); }
+async function resolveDiscountCode(kv, userId, productId, flag) {
+  if (!flag || flag === "-") return null;
+  if (flag === "d") return getAppliedDiscount(kv, userId, productId);
+  return flag; // legacy buttons that still carry the raw code
+}
+function normalizeCode(s) {
+  return String(s || "")
+    .replace(/[\u200b\u200c\u200d\u200e\u200f\ufeff]/g, "")
+    .replace(/[۰-۹]/g, (d) => "۰۱۲۳۴۵۶۷۸۹".indexOf(d))
+    .replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
+    .trim();
+}
+
+export async function removeAppliedDiscount(env, telegram, chatId, messageId, userId, productId) {
+  await env.BOT_KV.delete(appliedKey(userId, productId));
+  return showProductDetail(env, telegram, chatId, messageId, productId, null, userId);
+}
+
+export async function showProductDetail(env, telegram, chatId, messageId, productId, discountCode, userId) {
   const product = await getProduct(env.BOT_KV, productId);
   if (!product) {
     const texts = await getTexts(env.BOT_KV);
     return telegram.editOrSend(chatId, messageId, texts.buy_product_gone, { reply_markup: keyboard([], { back: "buy:categories" }) });
   }
+  if (!discountCode && userId) discountCode = await getAppliedDiscount(env.BOT_KV, userId, productId);
   const discount = discountCode ? await validDiscountFor(env.BOT_KV, discountCode, product) : null;
   const finalPrice = priceAfterDiscount(product, discount);
   let text = `🛍 <b>${product.name}</b>\n\n${product.description ? product.description + "\n\n" : ""}📦 حجم: ${product.volume_gb}GB\n⏳ مدت: ${product.duration_days} روز\n🔌 پروتکل: ${product.protocol}\n\n💰 قیمت: ${toman(product.price)}\n`;
   if (discount) text += `🎟 تخفیف: ${discount.code}\n💵 قیمت نهایی: ${toman(finalPrice)}\n`;
-  const buttons = [{ text: "💳 پرداخت از کیف پول", data: `buy:pay:${product.id}:${discountCode || "-"}` }];
+  const buttons = [{ text: "💳 پرداخت از کیف پول", data: `buy:pay:${product.id}:${discount ? "d" : "-"}` }];
   if (!discount) buttons.push({ text: "🎟 وارد کردن کد تخفیف", data: `buy:discount:${product.id}` });
+  else buttons.push({ text: "❌ حذف کد تخفیف", data: `buy:nodisc:${product.id}` });
   await telegram.editOrSend(chatId, messageId, text, { reply_markup: keyboard(buttons, { perRow: 1, back: `buy:cat:${product.category_id}` }) });
 }
 
@@ -114,19 +139,21 @@ export async function promptDiscountCode(env, telegram, chatId, messageId, userI
 export async function handleDiscountCodeInput(env, telegram, message, state) {
   const product = await getProduct(env.BOT_KV, state.product_id);
   await clearState(env, message.from.id);
-  const discount = product ? await validDiscountFor(env.BOT_KV, (message.text || "").trim(), product) : null;
+  const discount = product ? await validDiscountFor(env.BOT_KV, normalizeCode(message.text), product) : null;
   if (!discount) return telegram.sendMessage(message.chat.id, (await getTexts(env.BOT_KV)).buy_discount_invalid, { reply_markup: keyboard([{ text: "🛍 بازگشت", data: `buy:prod:${state.product_id}` }], { perRow: 1 }) });
-  return showProductDetail(env, telegram, message.chat.id, null, product.id, discount.code);
+  await env.BOT_KV.put(appliedKey(message.from.id, product.id), discount.code, { expirationTtl: 3600 });
+  return showProductDetail(env, telegram, message.chat.id, null, product.id, discount.code, message.from.id);
 }
 
 export async function showPayConfirm(env, telegram, chatId, messageId, userId, productId, discountCode) {
   const product = await getProduct(env.BOT_KV, productId);
   if (!product) return;
-  const discount = discountCode !== "-" ? await validDiscountFor(env.BOT_KV, discountCode, product) : null;
+  const code = await resolveDiscountCode(env.BOT_KV, userId, productId, discountCode);
+  const discount = code ? await validDiscountFor(env.BOT_KV, code, product) : null;
   const finalPrice = priceAfterDiscount(product, discount);
   const user = await getUser(env.BOT_KV, userId);
-  const text = `🛒 <b>${product.name}</b>\n\n💰 قیمت: ${toman(finalPrice)}\n💼 موجودی: ${toman(user.balance)}\n\n${user.balance < finalPrice ? (await getTexts(env.BOT_KV)).buy_insufficient_balance : "با تأیید، مبلغ از کیف پول کسر و سرویس ساخته می‌شود."}`;
-  const buttons = user.balance < finalPrice ? [{ text: "💳 شارژ کیف پول", data: "wallet:charge" }] : [{ text: "✅ تأیید خرید", data: `buy:confirm:${product.id}:${discountCode}` }, { text: "❌ لغو", data: `buy:prod:${product.id}` }];
+  const text = `🛒 <b>${product.name}</b>\n\n${discount ? `🎟 کد تخفیف: ${discount.code}\n` : ""}💰 قیمت: ${toman(finalPrice)}\n💼 موجودی: ${toman(user.balance)}\n\n${user.balance < finalPrice ? (await getTexts(env.BOT_KV)).buy_insufficient_balance : "با تأیید، مبلغ از کیف پول کسر و سرویس ساخته می‌شود."}`;
+  const buttons = user.balance < finalPrice ? [{ text: "💳 شارژ کیف پول", data: "wallet:charge" }] : [{ text: "✅ تأیید خرید", data: `buy:confirm:${product.id}:${discount ? "d" : "-"}` }, { text: "❌ لغو", data: `buy:prod:${product.id}` }];
   await telegram.editOrSend(chatId, messageId, text, { reply_markup: keyboard(buttons, { perRow: 2, back: `buy:prod:${product.id}` }) });
 }
 
@@ -145,15 +172,7 @@ export async function showCustomVolume(env, telegram, chatId, messageId, volume,
   const v = clamp(Number(volume || cfg.base_volume_gb || 1), Number(cfg.min_volume_gb || 1), Number(cfg.max_volume_gb || 1000));
   const d = clamp(Number(days || cfg.base_duration_days || 1), Number(cfg.min_duration_days || 1), Number(cfg.max_duration_days || 365));
   const price = customPrice(cfg, v, d);
-  const user = await getUser(env.BOT_KV, chatId); // private chat: chat id === user id
-  const balance = Number(user?.balance || 0);
-  const text =
-    `🛒 <b>خرید کانفیگ</b>\n\n` +
-    `📦 حجم انتخابی: ${v} گیگ\n` +
-    `⏳ مدت زمان: ${d} روز\n\n` +
-    `💵 قیمت هر گیگ: ${toman(cfg.extra_gb_price)}\n` +
-    `💰 مبلغ نهایی: ${toman(price)}\n` +
-    `💼 موجودی شما: ${toman(balance)}`;
+  const text = `${texts.custom_volume_title}\n\n${texts.custom_volume_description}\n\n${render(texts.custom_volume_summary, { volume:v, days:d, price:toman(price) })}\n\n💡 هر + یعنی ۱ واحد بیشتر.`;
   const buttons = [
     { text: "➖ حجم", data: `buy:custom:${clamp(v-1,cfg.min_volume_gb,cfg.max_volume_gb)}:${d}` },
     { text: `📦 ${v} GB`, data: `buy:custom:${v}:${d}` },
@@ -161,9 +180,7 @@ export async function showCustomVolume(env, telegram, chatId, messageId, volume,
     { text: "➖ روز", data: `buy:custom:${v}:${clamp(d-1,cfg.min_duration_days,cfg.max_duration_days)}` },
     { text: `⏳ ${d} روز`, data: `buy:custom:${v}:${d}` },
     { text: "➕ روز", data: `buy:custom:${v}:${clamp(d+1,cfg.min_duration_days,cfg.max_duration_days)}` },
-    balance >= price
-      ? { text: "✅ تأیید و ساخت سرویس", data: `buy:customconfirm:${v}:${d}` }
-      : { text: "💳 شارژ کیف پول", data: "wallet:charge" },
+    { text: `💳 پرداخت ${toman(price)}`, data: `buy:custompay:${v}:${d}` },
   ];
   await telegram.editOrSend(chatId, messageId, text, { reply_markup: keyboard(buttons, { perRow: 3, back: backTo }) });
 }
@@ -248,11 +265,16 @@ export async function confirmCustomPurchase(env, telegram, chatId, messageId, us
 // ---------- fixed product payment ----------
 export async function handlePurchaseConfirm(env, telegram, chatId, messageId, userId, productId, discountCode, callbackQueryId) {
   const kv=env.BOT_KV, product=await getProduct(kv,productId); if(!product) return;
-  const discount=discountCode!=="-"?await validDiscountFor(kv,discountCode,product):null, finalPrice=priceAfterDiscount(product,discount), texts=await getTexts(kv);
+  const texts=await getTexts(kv);
+  const appliedCode=await resolveDiscountCode(kv,userId,productId,discountCode);
+  let discount=appliedCode?await validDiscountFor(kv,appliedCode,product):null;
+  if(appliedCode && !discount) return telegram.answerCallbackQuery(callbackQueryId,"کد تخفیف دیگر معتبر نیست. دوباره بررسی کنید.",true);
+  const finalPrice=priceAfterDiscount(product,discount);
   let completed=false, createdOrder=null, debited=false, discountIncremented=false;
   try {
     await withUserLock(env,userId,async()=>{
       const user=await getUser(kv,userId); if(!user || user.balance<finalPrice) throw new Error("INSUFFICIENT");
+      if(discount){const fresh=await validDiscountFor(kv,discount.code,product);if(!fresh||priceAfterDiscount(product,fresh)!==finalPrice)throw new Error("DISCOUNT_INVALID");discount=fresh;}
       const purchaseKey=`purchase:inflight:${userId}`; if(await kv.get(purchaseKey)) throw Error("BUSY"); await kv.put(purchaseKey,String(Date.now()),{expirationTtl:60});
       await addTransaction(kv,userId,{type:"purchase",amount:-finalPrice,description:`خرید ${product.name}`}); debited=true;
       const order=await createOrder(kv,{user_id:userId,product_id:product.id,price:finalPrice,discount_code:discount?.code||null,status:"processing"}); createdOrder=order;
@@ -267,7 +289,7 @@ export async function handlePurchaseConfirm(env, telegram, chatId, messageId, us
       for(const candidate of candidates){try{panel=candidate.panel;profile=candidate.profile;result=await provisionUser(panel,profile,{username:`u${userId}_${order.id}`,volumeGB:product.volume_gb,days:product.duration_days});break;}catch(err){lastError=err;}}
       if(!result)throw (lastError||new Error("ساخت سرویس روی همه پنل‌ها ناموفق بود"));
       const service=await createService(kv,{user_id:userId,order_id:order.id,product_id:product.id,panel_id:panel.id,profile_id:profile.id,inbound_id:profile.inbound_id||null,username:result.username,remote_client_id:result.client_id||null,remote_sub_id:result.sub_id||null,subscription_url:result.subscription_url,volume_gb:product.volume_gb,expires_at:Date.now()+product.duration_days*86400000,status:"active"});
-      order.status="completed";order.service_id=service.id;await saveOrder(kv,order); completed=true; await kv.delete(`purchase:inflight:${userId}`);
+      order.status="completed";order.service_id=service.id;await saveOrder(kv,order); completed=true; await kv.delete(`purchase:inflight:${userId}`); await kv.delete(appliedKey(userId,product.id));
       const stats=await getStats(kv);stats.total_orders+=1;stats.total_sales+=finalPrice;await saveStats(kv,stats);
       await maybeRewardReferrer(kv,userId,finalPrice);await reportPurchase(env,telegram,user,product,finalPrice);await logPurchase(env,telegram,user,product,finalPrice);
       const text=render(texts.buy_service_ready,{username:service.username,volume:service.volume_gb,expires:new Date(service.expires_at).toLocaleDateString("fa-IR")});
@@ -276,6 +298,7 @@ export async function handlePurchaseConfirm(env, telegram, chatId, messageId, us
   } catch(e) {
     if(String(e?.message)!=="BUSY") await kv.delete(`purchase:inflight:${userId}`);
     if(String(e?.message)==="INSUFFICIENT") return telegram.answerCallbackQuery(callbackQueryId,texts.buy_insufficient_balance,true);
+    if(String(e?.message)==="DISCOUNT_INVALID") return telegram.answerCallbackQuery(callbackQueryId,"کد تخفیف دیگر معتبر نیست. دوباره بررسی کنید.",true);
     if(String(e?.message)==="BUSY") return telegram.answerCallbackQuery(callbackQueryId,"⏳ درخواست قبلی شما در حال انجام است. چند ثانیه صبر کنید.",true);
     if (createdOrder && !completed) { createdOrder.status="failed"; await saveOrder(kv,createdOrder); }
     if (discountIncremented && !completed && discount) { discount.uses=Math.max(0,(discount.uses||1)-1); await saveDiscount(kv,discount); }
